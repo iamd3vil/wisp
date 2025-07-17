@@ -39,7 +39,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
 
     pub async fn run(self) -> ServerResult<()> {
         // Channel buffer size - adjust as needed
-        const CHANNEL_BUF_SIZE: usize = 128;
+        const CHANNEL_BUF_SIZE: usize = 10000;
 
         loop {
             match self.listener.accept().await {
@@ -53,32 +53,69 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
 
                         // Split the stream into independent read/write halves
                         let (read_stream, write_stream) = stream.into_split();
-                        let writer =
-                            Arc::new(tokio::sync::Mutex::new(BufWriter::new(write_stream)));
 
                         // Spawn a dedicated writer task
-                        let writer_clone = Arc::clone(&writer);
                         let (write_task_tx, mut write_task_rx) =
                             mpsc::channel::<ServerCommand>(CHANNEL_BUF_SIZE);
 
                         tokio::spawn(async move {
+                            let mut writer = BufWriter::new(write_stream);
+                            let mut pending_messages = Vec::new();
+
                             while let Some(cmd) = write_task_rx.recv().await {
                                 match cmd {
                                     ServerCommand::Send(bytes) => {
-                                        let mut w = writer_clone.lock().await;
-                                        if let Err(e) = w.write_all(&bytes).await {
+                                        // Write immediately
+                                        if let Err(e) = writer.write_all(&bytes).await {
                                             error!(
                                                 "[Client {} Writer] Error writing bytes: {}",
                                                 client_id, e
                                             );
-                                            break; // Stop writing on error
+                                            break;
                                         }
-                                        if let Err(e) = w.flush().await {
+
+                                        // Collect any additional pending messages for batching
+                                        pending_messages.clear();
+                                        while let Ok(additional_cmd) = write_task_rx.try_recv() {
+                                            match additional_cmd {
+                                                ServerCommand::Send(additional_bytes) => {
+                                                    pending_messages.push(additional_bytes);
+                                                }
+                                                ServerCommand::Shutdown => {
+                                                    // Handle shutdown after writing pending
+                                                    if let Err(e) = writer.flush().await {
+                                                        error!(
+                                                            "[Client {} Writer] Error flushing on shutdown: {}",
+                                                            client_id, e
+                                                        );
+                                                    }
+                                                    debug!(
+                                                        "[Client {} Writer] Shutdown command received.",
+                                                        client_id
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
+
+                                        // Write all pending messages
+                                        for pending_bytes in &pending_messages {
+                                            if let Err(e) = writer.write_all(pending_bytes).await {
+                                                error!(
+                                                    "[Client {} Writer] Error writing pending bytes: {}",
+                                                    client_id, e
+                                                );
+                                                return;
+                                            }
+                                        }
+
+                                        // Flush only after writing batch
+                                        if let Err(e) = writer.flush().await {
                                             error!(
                                                 "[Client {} Writer] Error flushing writer: {}",
                                                 client_id, e
                                             );
-                                            break; // Stop writing on error
+                                            break;
                                         }
                                     }
                                     ServerCommand::Shutdown => {
@@ -86,9 +123,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                             "[Client {} Writer] Shutdown command received.",
                                             client_id
                                         );
-                                        // Try a final flush
-                                        let mut w = writer_clone.lock().await;
-                                        let _ = w.flush().await;
+                                        let _ = writer.flush().await;
                                         break;
                                     }
                                 }
@@ -188,8 +223,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
         loop {
             line_buffer.clear();
 
-            // Use select! to potentially handle timeouts or other events later
-            // For now, just read the line
+            // Use buffered reading - much more efficient than byte-by-byte
             let read_result = self.reader.read_line(&mut line_buffer).await;
 
             match read_result {
@@ -199,8 +233,9 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                     return Err(ServerError::ClientDisconnected);
                 }
                 Ok(_) => {
-                    // Bytes read, process line
+                    // Process the line we just read
                     let raw_line = line_buffer.trim_end();
+                    
                     debug!("[Client {}] Received Raw: '{}'", self.id, raw_line);
 
                     if raw_line.is_empty() {
@@ -215,8 +250,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                 "[Client {}] Parsed Command: '{}', Args Str: '{}'",
                                 self.id, command_upper, args_str
                             );
-                            let handler_result =
-                                self.handle_command(&command_upper, args_str).await;
+                            let handler_result = self.handle_command(&command_upper, args_str).await;
 
                             if let Err(e) = handler_result {
                                 error!(
@@ -225,7 +259,6 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                 );
                                 // Send -ERR back to client
                                 let err_msg = protocol::format_err(&e.to_string());
-                                // Use try_send for immediate errors if buffer full is acceptable, or await send
                                 if self
                                     .sender_to_writer
                                     .send(ServerCommand::Send(err_msg))
@@ -236,10 +269,8 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                         "[Client {}] Failed to queue error response: channel closed.",
                                         self.id
                                     );
-                                    return Err(ServerError::ClientDisconnected); // Assume disconnect if can't send error
+                                    return Err(ServerError::ClientDisconnected);
                                 }
-                                // Decide if the error is fatal for the connection
-                                // if is_fatal(&e) { return Err(e); }
                             }
                         }
                         Err(e) => {
@@ -260,7 +291,6 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                 );
                                 return Err(ServerError::ClientDisconnected);
                             }
-                            // Continue processing? Or disconnect on protocol errors? Let's continue for now.
                         }
                     }
                 }

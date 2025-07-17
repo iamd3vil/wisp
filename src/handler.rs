@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::command::ServerCommand;
+use crate::error::ServerResult;
 use crate::protocol::{self, ConnectOptions};
-use crate::{error::ServerResult, protocol::NatsCommand};
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
 use tokio::sync::{RwLock, mpsc};
 
 /// Trait defining the callbacks for handling NATS client commands.
@@ -80,21 +80,26 @@ pub trait NatsServerHandler: Send + Sync + 'static {
 /// A simple handler that just prints received commands.
 #[derive(Debug, Clone)]
 pub struct ClientHandler {
-    // Client IDs.
-    clients: Arc<RwLock<HashMap<u64, mpsc::Sender<NatsCommand>>>>, // Map of client IDs to their command channels
+    // Client IDs - using DashMap for lock-free concurrent access
+    // Now stores direct connection to client writer tasks
+    clients: Arc<DashMap<u64, mpsc::Sender<ServerCommand>>>,
 
-    // submap
+    // Single subscription map - can't shard due to wildcard matching requirements
     subscriptions: Arc<RwLock<submap::SubMap<u64>>>,
+
+    // Map from (client_id, subject) to SID for proper message formatting
+    sid_map: Arc<DashMap<(u64, String), String>>,
 }
 
 impl ClientHandler {
-    /// Creates a new instance of `PrintHandler`.
+    /// Creates a new instance of `ClientHandler`.
     pub fn new() -> Self {
         ClientHandler {
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients: Arc::new(DashMap::new()),
             subscriptions: Arc::new(RwLock::new(
                 submap::SubMap::new().separator('.').wildcard("*"),
             )),
+            sid_map: Arc::new(DashMap::new()),
         }
     }
 }
@@ -127,25 +132,50 @@ impl NatsServerHandler for ClientHandler {
         //     client_id, subject, reply_to, payload_str
         // );
 
-        // Find out the clients subscribed to this subject.
+        // Find out the clients subscribed to this subject
         let subscriptions = self.subscriptions.read().await;
         let client_ids = subscriptions.get_subscribers(subject);
+        
+        
+        // Collect clients and their senders first to minimize lock time
+        let mut clients_to_send = Vec::with_capacity(client_ids.len());
         for client_id in client_ids {
-            // Get sender from the clients map.
-            if let Some(tx) = self.clients.read().await.get(&client_id) {
-                let res = tx
-                    .send(NatsCommand::Pub {
-                        subject: subject.to_string(),
-                        payload: payload.clone(),
-                        reply_to: reply_to.map(|s| s.to_string()),
-                    })
-                    .await;
+            if let Some(tx_ref) = self.clients.get(&client_id) {
+                let tx = tx_ref.value().clone();
+                clients_to_send.push((client_id, tx));
+            }
+        }
+        drop(subscriptions); // Release the read lock early
+        
+        // Process each client
+        for (client_id, tx) in clients_to_send {
+            // Look up the SID for this client and subject
+            let sid = self
+                .sid_map
+                .get(&(client_id, subject.to_string()))
+                .map(|entry| entry.value().clone())
+                .unwrap_or_else(|| "1".to_string()); // Fallback SID
 
-                if let Err(e) = res {
-                    println!(
-                        "[Client {}] Error sending message to client {}: {:?}",
-                        client_id, client_id, e
-                    );
+            // Format the MSG protocol message for this subscriber
+            let msg = protocol::format_msg(subject, &sid, reply_to, &payload);
+
+            // Send the formatted message directly to the client's writer task
+            // Try non-blocking first, fall back to blocking if channel is full
+            match tx.try_send(ServerCommand::Send(msg)) {
+                Ok(_) => {
+                    // Message sent successfully
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // Client disconnected, remove from map
+                    self.clients.remove(&client_id);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // Channel full, use blocking send to apply back-pressure
+                    let msg_copy = protocol::format_msg(subject, &sid, reply_to, &payload);
+                    if let Err(_) = tx.send(ServerCommand::Send(msg_copy)).await {
+                        // Client likely disconnected, remove from map
+                        self.clients.remove(&client_id);
+                    }
                 }
             }
         }
@@ -165,53 +195,19 @@ impl NatsServerHandler for ClientHandler {
             "[Client {}] SUB Subject: '{}', QueueGroup: {:?}, SID: '{}'",
             client_id, subject, queue_group, sid
         );
-        // Create a mpsc channel for the subscription.
-        let (tx, mut rx) = mpsc::channel::<NatsCommand>(1000000);
-        self.clients.write().await.insert(client_id, tx);
 
+        // Store the client's writer channel directly (no per-subscription channels)
+        self.clients.insert(client_id, sender.clone());
+
+        // Register the client's interest in this subject
         self.subscriptions
             .write()
             .await
             .subscribe(subject, &client_id);
 
-        // Spawn a task to handle incoming messages for this subscription.
-        let sid_c = sid.to_string();
-        let sender = sender.clone();
-        tokio::spawn(async move {
-            while let Some(command) = rx.recv().await {
-                match command {
-                    NatsCommand::Pub {
-                        subject,
-                        payload,
-                        reply_to,
-                    } => {
-                        // Write the message to the Tcp stream.
-                        let msg =
-                            protocol::format_msg(&subject, &sid_c, reply_to.as_deref(), &payload);
-                        // Send the message to the client. Use try_send to avoid blocking.
-                        if let Err(e) = sender.try_send(ServerCommand::Send(msg)) {
-                            match e {
-                                mpsc::error::TrySendError::Closed(_) => {
-                                    // println!("[Client {}] Channel closed", client_id);
-                                }
-                                mpsc::error::TrySendError::Full(_) => {
-                                    println!(
-                                        "[Client {}] Channel full, dropping messages",
-                                        client_id
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    NatsCommand::Disconnect => {
-                        // Handle disconnect logic if needed.
-                        rx.close();
-                        println!("[Client {}] Disconnecting", client_id);
-                        break;
-                    }
-                }
-            }
-        });
+        // Store the SID mapping for this subscription
+        self.sid_map
+            .insert((client_id, subject.to_string()), sid.to_string());
 
         Ok(())
     }
@@ -249,13 +245,13 @@ impl NatsServerHandler for ClientHandler {
     }
 
     async fn handle_disconnect(&self, client_id: u64) {
-        // Close the channel for this client.
-        // This will cause the any subscription tasks to exit.
-        if let Some(tx) = self.clients.write().await.remove(&client_id) {
-            // Close the channel to signal that the client is disconnected.
-            let _ = tx.send(NatsCommand::Disconnect);
-        }
+        // Remove the client from the clients map
+        self.clients.remove(&client_id);
 
+        // Remove all SID mappings for this client
+        self.sid_map.retain(|(cid, _), _| *cid != client_id);
+
+        // Unregister client from subscriptions
         self.subscriptions
             .write()
             .await

@@ -3,27 +3,6 @@ use crate::error::{ServerError, ServerResult};
 use bytes::{Bytes, BytesMut}; // Added BufMut
 use serde::{Deserialize, Serialize};
 
-// --- Add itoa for efficient integer formatting ---
-// Note: Could also use the built-in but unstable `core::fmt::num::Itoa` if targeting nightly
-// or copy a simple integer formatting routine if dependencies are strictly disallowed.
-// Using the `itoa` crate is the standard, efficient approach.
-
-// NatsCommand enum, ConnectOptions struct, ServerInfo struct remain the same...
-#[derive(Debug, Clone, PartialEq)]
-pub enum NatsCommand {
-    // Connect(ConnectOptions),
-    Pub {
-        subject: String,
-        reply_to: Option<String>,
-        payload: Bytes, // Use Bytes for efficient slicing/sharing
-    },
-    Disconnect,
-    // Sub { ... },
-    // Unsub { ... },
-    // Ping,
-    // Pong,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct ConnectOptions {
     #[serde(default)]
@@ -132,6 +111,7 @@ pub fn parse_command_line(line: &str) -> ServerResult<(String, &str)> {
         }
     }
 }
+
 
 /// Helper function to parse PUB command arguments from the arguments string.
 /// Returns (subject, reply_to, size)
