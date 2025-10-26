@@ -85,33 +85,66 @@ impl ServerInfo {
     }
 }
 
-/// Parses the command line to extract the command keyword and the arguments string.
-/// Assumes the line ending `\r\n` has been trimmed.
-/// Returns the command (uppercase) and a slice containing the rest of the line (arguments).
-/// Optimization Note: Returns owned uppercase String as per original API. If caller can
-/// handle case-insensitive compares, returning `(&str, &str)` would avoid allocation.
-pub fn parse_command_line(line: &str) -> ServerResult<(String, &str)> {
-    let trimmed_line = line.trim_start();
-    if trimmed_line.is_empty() {
+/// Zero-allocation version of parse_command_line that works with bytes.
+/// Returns (command_bytes, args_bytes) without any string allocations.
+/// The caller is responsible for converting to strings if needed.
+pub fn parse_command_line_bytes(line: &[u8]) -> ServerResult<(&[u8], &[u8])> {
+    // Skip leading whitespace
+    let mut start = 0;
+    while start < line.len() && line[start].is_ascii_whitespace() {
+        start += 1;
+    }
+
+    if start >= line.len() {
         return Err(ServerError::InvalidProtocol(
             "Empty line received".to_string(),
         ));
     }
 
-    match trimmed_line.split_once(char::is_whitespace) {
-        Some((command, args_part)) => {
-            // Found whitespace, split command and args
-            // Trim potential leading whitespace from args_part for consistency
-            let args_str = args_part.trim_start();
-            Ok((command.to_uppercase(), args_str)) // Allocation required by API
-        }
-        None => {
-            // No whitespace, the whole line is the command (e.g., PING, PONG)
-            Ok((trimmed_line.to_uppercase(), "")) // Allocation required by API
+    let trimmed_line = &line[start..];
+
+    // Find first whitespace character
+    for (i, &byte) in trimmed_line.iter().enumerate() {
+        if byte.is_ascii_whitespace() {
+            let command = &trimmed_line[..i];
+
+            // Skip whitespace to find start of args
+            let mut args_start = i;
+            while args_start < trimmed_line.len() && trimmed_line[args_start].is_ascii_whitespace()
+            {
+                args_start += 1;
+            }
+
+            let args = if args_start < trimmed_line.len() {
+                &trimmed_line[args_start..]
+            } else {
+                &[]
+            };
+
+            return Ok((command, args));
         }
     }
+
+    // No whitespace found, entire line is the command
+    Ok((trimmed_line, &[]))
 }
 
+/// Helper function to check if byte slice matches a command (case-insensitive ASCII)
+pub fn command_matches(command_bytes: &[u8], target: &[u8]) -> bool {
+    if command_bytes.len() != target.len() {
+        return false;
+    }
+
+    command_bytes
+        .iter()
+        .zip(target.iter())
+        .all(|(&a, &b)| a.to_ascii_uppercase() == b.to_ascii_uppercase())
+}
+
+/// Returns true if the subject contains wildcard tokens (`*` or `>`)
+pub fn subject_contains_wildcard(subject: &str) -> bool {
+    subject.split('.').any(|token| token == "*" || token == ">")
+}
 
 /// Helper function to parse PUB command arguments from the arguments string.
 /// Returns (subject, reply_to, size)
@@ -128,6 +161,12 @@ pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, u
     match (subject, part2, part3, trailing) {
         (Some(subj), Some(size_str), None, None) => {
             // PUB <subject> <size>
+            if subject_contains_wildcard(subj) {
+                return Err(ServerError::InvalidArgument {
+                    command: "PUB".to_string(),
+                    argument: format!("wildcard subjects are not allowed: '{}'", subj),
+                });
+            }
             let size = size_str
                 .parse::<usize>()
                 .map_err(|_| ServerError::InvalidArgument {
@@ -138,6 +177,12 @@ pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, u
         }
         (Some(subj), Some(reply), Some(size_str), None) => {
             // PUB <subject> <reply-to> <size>
+            if subject_contains_wildcard(subj) {
+                return Err(ServerError::InvalidArgument {
+                    command: "PUB".to_string(),
+                    argument: format!("wildcard subjects are not allowed: '{}'", subj),
+                });
+            }
             let size = size_str
                 .parse::<usize>()
                 .map_err(|_| ServerError::InvalidArgument {

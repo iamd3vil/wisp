@@ -1,8 +1,11 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command::ServerCommand;
 use crate::error::ServerResult;
 use crate::protocol::{self, ConnectOptions};
+use ahash::AHasher;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -75,6 +78,13 @@ pub trait NatsServerHandler: Send + Sync + 'static {
     async fn handle_disconnect(&self, client_id: u64);
 }
 
+#[derive(Debug, Clone)]
+struct SubscriberDispatch {
+    client_id: u64,
+    sender: mpsc::Sender<ServerCommand>,
+    sid: Arc<str>,
+}
+
 // --- Example Handler Implementation ---
 
 /// A simple handler that just prints received commands.
@@ -84,23 +94,166 @@ pub struct ClientHandler {
     // Now stores direct connection to client writer tasks
     clients: Arc<DashMap<u64, mpsc::Sender<ServerCommand>>>,
 
-    // Single subscription map - can't shard due to wildcard matching requirements
-    subscriptions: Arc<RwLock<submap::SubMap<u64>>>,
+    // Sharded subscription maps to reduce contention on hot paths
+    subscriptions: Arc<Vec<RwLock<submap::SubMap<u64>>>>,
+    // Dedicated shard for wildcard-first subscriptions (e.g., "*.foo", ">")
+    wildcard_subscriptions: Arc<RwLock<submap::SubMap<u64>>>,
+    wildcard_has_subscribers: Arc<AtomicBool>,
 
-    // Map from (client_id, subject) to SID for proper message formatting
-    sid_map: Arc<DashMap<(u64, String), String>>,
+    // Map from client_id to subject -> SID for proper message formatting
+    sid_map: Arc<DashMap<u64, DashMap<String, String>>>,
+
+    // Cache resolved subscriber lists per publish subject
+    dispatch_cache: Arc<DashMap<String, Arc<Vec<SubscriberDispatch>>>>,
 }
 
 impl ClientHandler {
+    const NUM_SUB_SHARDS: usize = 64;
+
     /// Creates a new instance of `ClientHandler`.
     pub fn new() -> Self {
+        let mut shards = Vec::with_capacity(Self::NUM_SUB_SHARDS);
+        for _ in 0..Self::NUM_SUB_SHARDS {
+            shards.push(RwLock::new(Self::create_submap()));
+        }
+
         ClientHandler {
             clients: Arc::new(DashMap::new()),
-            subscriptions: Arc::new(RwLock::new(
-                submap::SubMap::new().separator('.').wildcard("*"),
-            )),
+            subscriptions: Arc::new(shards),
+            wildcard_subscriptions: Arc::new(RwLock::new(Self::create_submap())),
+            wildcard_has_subscribers: Arc::new(AtomicBool::new(false)),
             sid_map: Arc::new(DashMap::new()),
+            dispatch_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    fn create_submap() -> submap::SubMap<u64> {
+        submap::SubMap::new().separator('.').wildcard("*")
+    }
+
+    fn subject_prefix(subject: &str) -> &str {
+        subject.split('.').next().unwrap_or("")
+    }
+
+    fn is_wildcard_prefix(prefix: &str) -> bool {
+        prefix.is_empty() || prefix == "*" || prefix == ">"
+    }
+
+    fn shard_index(prefix: &str) -> usize {
+        let mut hasher = AHasher::default();
+        prefix.hash(&mut hasher);
+        (hasher.finish() as usize) % Self::NUM_SUB_SHARDS
+    }
+
+    fn invalidate_dispatch_cache(&self) {
+        self.dispatch_cache.clear();
+    }
+
+    fn resolve_sid_for_subject(&self, client_id: u64, subject: &str) -> Option<Arc<str>> {
+        let subject_map = self.sid_map.get(&client_id)?;
+
+        if let Some(sid_ref) = subject_map.get(subject) {
+            return Some(Arc::<str>::from(sid_ref.value().as_str()));
+        }
+
+        for entry in subject_map.value().iter() {
+            if Self::subject_matches(entry.key(), subject) {
+                return Some(Arc::<str>::from(entry.value().as_str()));
+            }
+        }
+
+        None
+    }
+
+    fn subject_matches(pattern: &str, subject: &str) -> bool {
+        if pattern == subject {
+            return true;
+        }
+
+        let mut pattern_tokens = pattern.split('.');
+        let mut subject_tokens = subject.split('.');
+
+        loop {
+            match (pattern_tokens.next(), subject_tokens.next()) {
+                (Some(">"), _) => return true,
+                (Some(p), Some(s)) => {
+                    if p == "*" || p == s {
+                        continue;
+                    }
+                    return false;
+                }
+                (Some(p), None) => {
+                    if p == ">" && pattern_tokens.next().is_none() {
+                        return true;
+                    }
+                    return false;
+                }
+                (None, Some(_)) => return false,
+                (None, None) => return true,
+            }
+        }
+    }
+
+    async fn build_dispatches(&self, subject: &str) -> Vec<SubscriberDispatch> {
+        let prefix = Self::subject_prefix(subject);
+        let mut client_ids: Vec<u64> = Vec::new();
+
+        if !Self::is_wildcard_prefix(prefix) {
+            let idx = Self::shard_index(prefix);
+            let targeted = {
+                let shard = self.subscriptions[idx].read().await;
+                shard.get_subscribers(subject)
+            };
+            client_ids.extend(targeted.into_iter());
+        }
+
+        if self.wildcard_has_subscribers.load(Ordering::Relaxed) {
+            let wildcard_clients = {
+                let shard = self.wildcard_subscriptions.read().await;
+                shard.get_subscribers(subject)
+            };
+            client_ids.extend(wildcard_clients.into_iter());
+        }
+
+        if client_ids.is_empty() {
+            return Vec::new();
+        }
+
+        client_ids.sort_unstable();
+        client_ids.dedup();
+
+        let mut dispatches = Vec::with_capacity(client_ids.len());
+
+        for client_id in client_ids {
+            if let Some(sender_ref) = self.clients.get(&client_id) {
+                let sender = sender_ref.value().clone();
+                drop(sender_ref);
+
+                let sid = self
+                    .resolve_sid_for_subject(client_id, subject)
+                    .unwrap_or_else(|| Arc::<str>::from("1"));
+
+                dispatches.push(SubscriberDispatch {
+                    client_id,
+                    sender,
+                    sid,
+                });
+            }
+        }
+
+        dispatches
+    }
+
+    async fn get_or_build_dispatches(&self, subject: &str) -> Arc<Vec<SubscriberDispatch>> {
+        if let Some(entry) = self.dispatch_cache.get(subject) {
+            return Arc::clone(entry.value());
+        }
+
+        let dispatches = self.build_dispatches(subject).await;
+        let arc = Arc::new(dispatches);
+        self.dispatch_cache
+            .insert(subject.to_string(), Arc::clone(&arc));
+        arc
     }
 }
 
@@ -113,8 +266,6 @@ impl NatsServerHandler for ClientHandler {
         _sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()> {
         println!("[Client {}] CONNECT: {:?}", client_id, options);
-        let mut subscriptions = self.subscriptions.write().await;
-        subscriptions.register_client(&client_id);
         Ok(())
     }
 
@@ -126,55 +277,32 @@ impl NatsServerHandler for ClientHandler {
         payload: Bytes,
         _sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()> {
-        // let payload_str = String::from_utf8_lossy(&payload);
-        // println!(
-        //     "[Client {}] PUB Subject: '{}', ReplyTo: {:?}, Payload: '{}'",
-        //     client_id, subject, reply_to, payload_str
-        // );
+        let dispatches = self.get_or_build_dispatches(subject).await;
 
-        // Find out the clients subscribed to this subject
-        let subscriptions = self.subscriptions.read().await;
-        let client_ids = subscriptions.get_subscribers(subject);
-        
-        
-        // Collect clients and their senders first to minimize lock time
-        let mut clients_to_send = Vec::with_capacity(client_ids.len());
-        for client_id in client_ids {
-            if let Some(tx_ref) = self.clients.get(&client_id) {
-                let tx = tx_ref.value().clone();
-                clients_to_send.push((client_id, tx));
-            }
+        if dispatches.is_empty() {
+            return Ok(());
         }
-        drop(subscriptions); // Release the read lock early
-        
-        // Process each client
-        for (client_id, tx) in clients_to_send {
-            // Look up the SID for this client and subject
-            let sid = self
-                .sid_map
-                .get(&(client_id, subject.to_string()))
-                .map(|entry| entry.value().clone())
-                .unwrap_or_else(|| "1".to_string()); // Fallback SID
 
-            // Format the MSG protocol message for this subscriber
-            let msg = protocol::format_msg(subject, &sid, reply_to, &payload);
+        for dispatch in dispatches.iter() {
+            let msg = ServerCommand::Send(protocol::format_msg(
+                subject,
+                dispatch.sid.as_ref(),
+                reply_to,
+                &payload,
+            ));
 
-            // Send the formatted message directly to the client's writer task
-            // Try non-blocking first, fall back to blocking if channel is full
-            match tx.try_send(ServerCommand::Send(msg)) {
-                Ok(_) => {
-                    // Message sent successfully
+            match dispatch.sender.try_send(msg) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Closed(_cmd)) => {
+                    self.clients.remove(&dispatch.client_id);
+                    self.sid_map.remove(&dispatch.client_id);
+                    self.invalidate_dispatch_cache();
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    // Client disconnected, remove from map
-                    self.clients.remove(&client_id);
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    // Channel full, use blocking send to apply back-pressure
-                    let msg_copy = protocol::format_msg(subject, &sid, reply_to, &payload);
-                    if let Err(_) = tx.send(ServerCommand::Send(msg_copy)).await {
-                        // Client likely disconnected, remove from map
-                        self.clients.remove(&client_id);
+                Err(mpsc::error::TrySendError::Full(cmd)) => {
+                    if dispatch.sender.send(cmd).await.is_err() {
+                        self.clients.remove(&dispatch.client_id);
+                        self.sid_map.remove(&dispatch.client_id);
+                        self.invalidate_dispatch_cache();
                     }
                 }
             }
@@ -199,15 +327,30 @@ impl NatsServerHandler for ClientHandler {
         // Store the client's writer channel directly (no per-subscription channels)
         self.clients.insert(client_id, sender.clone());
 
-        // Register the client's interest in this subject
-        self.subscriptions
-            .write()
-            .await
-            .subscribe(subject, &client_id);
+        // Register the client's interest in this subject on shard that matches the prefix
+        let prefix = Self::subject_prefix(subject);
+
+        if Self::is_wildcard_prefix(prefix) {
+            let mut shard = self.wildcard_subscriptions.write().await;
+            if !shard.subscribe(subject, &client_id) {
+                shard.register_client(&client_id);
+                shard.subscribe(subject, &client_id);
+            }
+            self.wildcard_has_subscribers.store(true, Ordering::Relaxed);
+        } else {
+            let idx = Self::shard_index(prefix);
+            let mut shard = self.subscriptions[idx].write().await;
+            if !shard.subscribe(subject, &client_id) {
+                shard.register_client(&client_id);
+                shard.subscribe(subject, &client_id);
+            }
+        }
 
         // Store the SID mapping for this subscription
-        self.sid_map
-            .insert((client_id, subject.to_string()), sid.to_string());
+        let subject_map = self.sid_map.entry(client_id).or_insert_with(DashMap::new);
+        subject_map.insert(subject.to_string(), sid.to_string());
+
+        self.invalidate_dispatch_cache();
 
         Ok(())
     }
@@ -223,6 +366,7 @@ impl NatsServerHandler for ClientHandler {
             "[Client {}] UNSUB SID: '{}', MaxMsgs: {:?}",
             client_id, sid, max_msgs
         );
+        self.invalidate_dispatch_cache();
         Ok(())
     }
 
@@ -249,13 +393,22 @@ impl NatsServerHandler for ClientHandler {
         self.clients.remove(&client_id);
 
         // Remove all SID mappings for this client
-        self.sid_map.retain(|(cid, _), _| *cid != client_id);
+        self.sid_map.remove(&client_id);
 
         // Unregister client from subscriptions
-        self.subscriptions
-            .write()
-            .await
-            .unregister_client(&client_id);
+        for shard in self.subscriptions.iter() {
+            shard.write().await.unregister_client(&client_id);
+        }
+        {
+            let mut shard = self.wildcard_subscriptions.write().await;
+            shard.unregister_client(&client_id);
+            if self.wildcard_has_subscribers.load(Ordering::Relaxed) && shard.is_empty() {
+                self.wildcard_has_subscribers
+                    .store(false, Ordering::Relaxed);
+            }
+        }
         println!("[Client {}] Disconnected", client_id);
+
+        self.invalidate_dispatch_cache();
     }
 }

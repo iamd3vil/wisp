@@ -217,14 +217,14 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
         }
         debug!("[Client {}] Queued INFO for sending", self.id);
 
-        let mut line_buffer = String::new();
+        let mut line_buffer = Vec::with_capacity(1024);
 
         // Main command processing loop
         loop {
             line_buffer.clear();
 
-            // Use buffered reading - much more efficient than byte-by-byte
-            let read_result = self.reader.read_line(&mut line_buffer).await;
+            // Use Vec<u8> for more efficient line reading - avoids String allocations
+            let read_result = self.reader.read_until(b'\n', &mut line_buffer).await;
 
             match read_result {
                 Ok(0) => {
@@ -233,29 +233,50 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                     return Err(ServerError::ClientDisconnected);
                 }
                 Ok(_) => {
-                    // Process the line we just read
-                    let raw_line = line_buffer.trim_end();
-                    
-                    debug!("[Client {}] Received Raw: '{}'", self.id, raw_line);
+                    // Process the line we just read - remove trailing \r\n
+                    let mut line_bytes = &line_buffer[..];
+                    if line_bytes.ends_with(b"\r\n") {
+                        line_bytes = &line_bytes[..line_bytes.len() - 2];
+                    } else if line_bytes.ends_with(b"\n") {
+                        line_bytes = &line_bytes[..line_bytes.len() - 1];
+                    }
 
-                    if raw_line.is_empty() {
+                    debug!(
+                        "[Client {}] Received Raw: '{}'",
+                        self.id,
+                        String::from_utf8_lossy(line_bytes)
+                    );
+
+                    if line_bytes.is_empty() {
                         continue;
                     }
 
-                    let parse_result = protocol::parse_command_line(raw_line);
+                    let parse_result = protocol::parse_command_line_bytes(line_bytes);
 
                     match parse_result {
-                        Ok((command_upper, args_str)) => {
+                        Ok((command_bytes, args_bytes)) => {
+                            // Convert args to string for existing handlers
+                            let args_str = std::str::from_utf8(args_bytes).map_err(|_| {
+                                ServerError::InvalidProtocol(
+                                    "Invalid UTF-8 in command arguments".to_string(),
+                                )
+                            })?;
+
                             debug!(
                                 "[Client {}] Parsed Command: '{}', Args Str: '{}'",
-                                self.id, command_upper, args_str
+                                self.id,
+                                String::from_utf8_lossy(command_bytes),
+                                args_str
                             );
-                            let handler_result = self.handle_command(&command_upper, args_str).await;
+
+                            let handler_result =
+                                self.handle_command_bytes(command_bytes, args_str).await;
 
                             if let Err(e) = handler_result {
+                                let command_str = String::from_utf8_lossy(command_bytes);
                                 error!(
                                     "[Client {}] Error handling command '{}': {}",
-                                    self.id, command_upper, e
+                                    self.id, command_str, e
                                 );
                                 // Send -ERR back to client
                                 let err_msg = protocol::format_err(&e.to_string());
@@ -274,9 +295,10 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                             }
                         }
                         Err(e) => {
+                            let line_str = String::from_utf8_lossy(line_bytes);
                             warn!(
                                 "[Client {}] Invalid protocol line '{}': {}",
-                                self.id, raw_line, e
+                                self.id, line_str, e
                             );
                             let err_msg = protocol::format_err("Unknown Protocol Operation");
                             if self
@@ -303,109 +325,110 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
         } // end loop
     }
 
-    /// Helper to dispatch to the correct handler method
-    async fn handle_command(&mut self, command: &str, args_str: &str) -> ServerResult<()> {
-        match command {
-            "CONNECT" => {
-                let options = protocol::parse_connect_args(args_str)?;
-                // Pass the sender clone to the handler
-                self.handler
-                    .handle_connect(self.id, &options, &self.sender_to_writer)
-                    .await?;
-                self.connect_options = Some(options); // Store options after successful handling
-            }
-            "PUB" => {
-                let (subject, reply_to, size) = protocol::parse_pub_args(args_str)?;
-                // Read payload
-                let mut payload_buffer = BytesMut::with_capacity(size + 2);
-                payload_buffer.resize(size + 2, 0);
-                self.reader.read_exact(&mut payload_buffer).await?; // Read from reader half
+    /// Zero-allocation version of handle_command that works with byte slices
+    async fn handle_command_bytes(
+        &mut self,
+        command_bytes: &[u8],
+        args_str: &str,
+    ) -> ServerResult<()> {
+        // Use case-insensitive byte comparison instead of string conversion
+        if protocol::command_matches(command_bytes, b"CONNECT") {
+            let options = protocol::parse_connect_args(args_str)?;
+            // Pass the sender clone to the handler
+            self.handler
+                .handle_connect(self.id, &options, &self.sender_to_writer)
+                .await?;
+            self.connect_options = Some(options); // Store options after successful handling
+        } else if protocol::command_matches(command_bytes, b"PUB") {
+            let (subject, reply_to, size) = protocol::parse_pub_args(args_str)?;
+            // Read payload
+            let mut payload_buffer = BytesMut::with_capacity(size + 2);
+            payload_buffer.resize(size + 2, 0);
+            self.reader.read_exact(&mut payload_buffer).await?; // Read from reader half
 
-                if &payload_buffer[size..] != b"\r\n" {
-                    return Err(ServerError::InvalidProtocol(
-                        "PUB payload not followed by CRLF".to_string(),
-                    ));
-                }
-                let payload = payload_buffer.split_to(size).freeze();
-                // Pass sender clone to handler
-                self.handler
-                    .handle_pub(
-                        self.id,
-                        &subject,
-                        reply_to.as_deref(),
-                        payload,
-                        &self.sender_to_writer,
-                    )
-                    .await?;
+            if &payload_buffer[size..] != b"\r\n" {
+                return Err(ServerError::InvalidProtocol(
+                    "PUB payload not followed by CRLF".to_string(),
+                ));
             }
-            "SUB" => {
-                let (subject, queue_group, sid) = protocol::parse_sub_args(args_str)?;
-                self.handler
-                    .handle_sub(
-                        self.id,
-                        &subject,
-                        queue_group.as_deref(),
-                        &sid,
-                        &self.sender_to_writer,
-                    )
-                    .await?;
+            let payload = payload_buffer.split_to(size).freeze();
+            // Pass sender clone to handler
+            self.handler
+                .handle_pub(
+                    self.id,
+                    &subject,
+                    reply_to.as_deref(),
+                    payload,
+                    &self.sender_to_writer,
+                )
+                .await?;
+        } else if protocol::command_matches(command_bytes, b"SUB") {
+            let (subject, queue_group, sid) = protocol::parse_sub_args(args_str)?;
+            self.handler
+                .handle_sub(
+                    self.id,
+                    &subject,
+                    queue_group.as_deref(),
+                    &sid,
+                    &self.sender_to_writer,
+                )
+                .await?;
+        } else if protocol::command_matches(command_bytes, b"UNSUB") {
+            let (sid, max_msgs) = protocol::parse_unsub_args(args_str)?;
+            self.handler
+                .handle_unsub(self.id, &sid, max_msgs, &self.sender_to_writer)
+                .await?;
+        } else if protocol::command_matches(command_bytes, b"PING") {
+            if !args_str.is_empty() {
+                warn!(
+                    "[Client {}] PING received with unexpected arguments: '{}'",
+                    self.id, args_str
+                );
             }
-            "UNSUB" => {
-                let (sid, max_msgs) = protocol::parse_unsub_args(args_str)?;
-                self.handler
-                    .handle_unsub(self.id, &sid, max_msgs, &self.sender_to_writer)
-                    .await?;
-            }
-            "PING" => {
-                if !args_str.is_empty() {
+            self.handler
+                .handle_ping(self.id, &self.sender_to_writer)
+                .await?;
+            // Respond with PONG unless echo is disabled
+            let should_send_pong = self.connect_options.as_ref().map_or(true, |opts| opts.echo);
+            if should_send_pong {
+                let pong_bytes = Bytes::from_static(b"PONG\r\n");
+                // Queue PONG via sender
+                if self
+                    .sender_to_writer
+                    .send(ServerCommand::Send(pong_bytes))
+                    .await
+                    .is_err()
+                {
                     warn!(
-                        "[Client {}] PING received with unexpected arguments: '{}'",
-                        self.id, args_str
+                        "[Client {}] Failed to queue PONG response: channel closed.",
+                        self.id
                     );
+                    return Err(ServerError::ClientDisconnected);
                 }
-                self.handler
-                    .handle_ping(self.id, &self.sender_to_writer)
-                    .await?;
-                // Respond with PONG unless echo is disabled
-                let should_send_pong = self.connect_options.as_ref().map_or(true, |opts| opts.echo);
-                if should_send_pong {
-                    let pong_bytes = Bytes::from_static(b"PONG\r\n");
-                    // Queue PONG via sender
-                    if self
-                        .sender_to_writer
-                        .send(ServerCommand::Send(pong_bytes))
-                        .await
-                        .is_err()
-                    {
-                        warn!(
-                            "[Client {}] Failed to queue PONG response: channel closed.",
-                            self.id
-                        );
-                        return Err(ServerError::ClientDisconnected);
-                    }
-                    debug!("[Client {}] Queued PONG for sending", self.id);
-                } else {
-                    debug!("[Client {}] Suppressing PONG due to echo: false", self.id);
-                }
+                debug!("[Client {}] Queued PONG for sending", self.id);
+            } else {
+                debug!("[Client {}] Suppressing PONG due to echo: false", self.id);
             }
-            "PONG" => {
-                if !args_str.is_empty() {
-                    warn!(
-                        "[Client {}] PONG received with unexpected arguments: '{}'",
-                        self.id, args_str
-                    );
-                }
-                self.handler
-                    .handle_pong(self.id, &self.sender_to_writer)
-                    .await?;
+        } else if protocol::command_matches(command_bytes, b"PONG") {
+            if !args_str.is_empty() {
+                warn!(
+                    "[Client {}] PONG received with unexpected arguments: '{}'",
+                    self.id, args_str
+                );
             }
-            _ => {
-                warn!("[Client {}] Received unknown command: {}", self.id, command);
-                return Err(ServerError::InvalidCommand(format!(
-                    "Unknown command: {}",
-                    command
-                ))); // Return error to send -ERR
-            }
+            self.handler
+                .handle_pong(self.id, &self.sender_to_writer)
+                .await?;
+        } else {
+            let command_str = String::from_utf8_lossy(command_bytes);
+            warn!(
+                "[Client {}] Received unknown command: {}",
+                self.id, command_str
+            );
+            return Err(ServerError::InvalidCommand(format!(
+                "Unknown command: {}",
+                command_str
+            ))); // Return error to send -ERR
         }
         Ok(()) // Command handled successfully (at least by the parser/dispatcher)
     }
