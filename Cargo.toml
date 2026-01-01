@@ -3,6 +3,9 @@ name = "wisp"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+debug = true
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"

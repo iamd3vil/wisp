@@ -283,13 +283,19 @@ impl NatsServerHandler for ClientHandler {
             return Ok(());
         }
 
+        let payload_len = payload.len();
+
         for dispatch in dispatches.iter() {
-            let msg = ServerCommand::Send(protocol::format_msg(
+            let header = protocol::format_msg_header(
                 subject,
                 dispatch.sid.as_ref(),
                 reply_to,
-                &payload,
-            ));
+                payload_len,
+            );
+            let msg = ServerCommand::SendMessage {
+                header,
+                payload: payload.clone(),
+            };
 
             match dispatch.sender.try_send(msg) {
                 Ok(_) => {}

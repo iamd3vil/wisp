@@ -51,7 +51,6 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                     tokio::spawn(async move {
                         let client_id = generate_client_id();
 
-                        // Split the stream into independent read/write halves
                         let (read_stream, write_stream) = stream.into_split();
 
                         // Spawn a dedicated writer task
@@ -59,73 +58,68 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                             mpsc::channel::<ServerCommand>(CHANNEL_BUF_SIZE);
 
                         tokio::spawn(async move {
-                            let mut writer = BufWriter::new(write_stream);
-                            let mut pending_messages = Vec::new();
+                            let mut writer = BufWriter::with_capacity(8192, write_stream);
+                            const CRLF: &[u8] = b"\r\n";
 
-                            while let Some(cmd) = write_task_rx.recv().await {
+                            async fn write_command(
+                                writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+                                cmd: ServerCommand,
+                            ) -> std::io::Result<()> {
                                 match cmd {
                                     ServerCommand::Send(bytes) => {
-                                        // Write immediately
-                                        if let Err(e) = writer.write_all(&bytes).await {
-                                            error!(
-                                                "[Client {} Writer] Error writing bytes: {}",
-                                                client_id, e
-                                            );
-                                            break;
-                                        }
-
-                                        // Collect any additional pending messages for batching
-                                        pending_messages.clear();
-                                        while let Ok(additional_cmd) = write_task_rx.try_recv() {
-                                            match additional_cmd {
-                                                ServerCommand::Send(additional_bytes) => {
-                                                    pending_messages.push(additional_bytes);
-                                                }
-                                                ServerCommand::Shutdown => {
-                                                    // Handle shutdown after writing pending
-                                                    if let Err(e) = writer.flush().await {
-                                                        error!(
-                                                            "[Client {} Writer] Error flushing on shutdown: {}",
-                                                            client_id, e
-                                                        );
-                                                    }
-                                                    debug!(
-                                                        "[Client {} Writer] Shutdown command received.",
-                                                        client_id
-                                                    );
-                                                    return;
-                                                }
-                                            }
-                                        }
-
-                                        // Write all pending messages
-                                        for pending_bytes in &pending_messages {
-                                            if let Err(e) = writer.write_all(pending_bytes).await {
-                                                error!(
-                                                    "[Client {} Writer] Error writing pending bytes: {}",
-                                                    client_id, e
-                                                );
-                                                return;
-                                            }
-                                        }
-
-                                        // Flush only after writing batch
-                                        if let Err(e) = writer.flush().await {
-                                            error!(
-                                                "[Client {} Writer] Error flushing writer: {}",
-                                                client_id, e
-                                            );
-                                            break;
-                                        }
+                                        writer.write_all(&bytes).await
                                     }
-                                    ServerCommand::Shutdown => {
+                                    ServerCommand::SendMessage { header, payload } => {
+                                        writer.write_all(&header).await?;
+                                        writer.write_all(&payload).await?;
+                                        writer.write_all(CRLF).await
+                                    }
+                                    ServerCommand::Shutdown => Ok(()),
+                                }
+                            }
+
+                            while let Some(cmd) = write_task_rx.recv().await {
+                                if matches!(cmd, ServerCommand::Shutdown) {
+                                    debug!(
+                                        "[Client {} Writer] Shutdown command received.",
+                                        client_id
+                                    );
+                                    let _ = writer.flush().await;
+                                    break;
+                                }
+
+                                if let Err(e) = write_command(&mut writer, cmd).await {
+                                    error!(
+                                        "[Client {} Writer] Error writing: {}",
+                                        client_id, e
+                                    );
+                                    break;
+                                }
+
+                                while let Ok(additional_cmd) = write_task_rx.try_recv() {
+                                    if matches!(additional_cmd, ServerCommand::Shutdown) {
+                                        let _ = writer.flush().await;
                                         debug!(
                                             "[Client {} Writer] Shutdown command received.",
                                             client_id
                                         );
-                                        let _ = writer.flush().await;
-                                        break;
+                                        return;
                                     }
+                                    if let Err(e) = write_command(&mut writer, additional_cmd).await {
+                                        error!(
+                                            "[Client {} Writer] Error writing pending: {}",
+                                            client_id, e
+                                        );
+                                        return;
+                                    }
+                                }
+
+                                if let Err(e) = writer.flush().await {
+                                    error!(
+                                        "[Client {} Writer] Error flushing: {}",
+                                        client_id, e
+                                    );
+                                    break;
                                 }
                             }
                             debug!("[Client {} Writer] Writer task finished.", client_id);

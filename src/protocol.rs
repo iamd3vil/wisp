@@ -276,17 +276,36 @@ pub fn parse_connect_args(args_str: &str) -> ServerResult<ConnectOptions> {
     serde_json::from_str(args_str).map_err(ServerError::JsonError)
 }
 
-/// Formats a message payload for sending to a client according to the NATS MSG protocol.
-/// Optimized: Uses `itoa` for efficient integer formatting.
-///
-/// # Arguments
-/// * `subject` - The target subject.
-/// * `sid` - The client's subscription ID for this subject.
-/// * `reply_to` - Optional reply-to subject. **Changed to `Option<&str>` for efficiency**.
-/// * `payload` - The message payload.
-///
-/// # Returns
-/// A `Bytes` object containing the fully formatted `MSG` command ready for sending.
+pub fn format_msg_header(
+    subject: &str,
+    sid: &str,
+    reply_to: Option<&str>,
+    payload_len: usize,
+) -> Bytes {
+    let reply_len = reply_to.map_or(0, |rt| rt.len() + 1);
+    let size_digits_estimate = 10;
+    let header_len = 4 + subject.len() + 1 + sid.len() + reply_len + 1 + size_digits_estimate + 2;
+
+    let mut buf = BytesMut::with_capacity(header_len);
+
+    buf.extend_from_slice(b"MSG ");
+    buf.extend_from_slice(subject.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(sid.as_bytes());
+
+    if let Some(rt) = reply_to {
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(rt.as_bytes());
+    }
+
+    buf.extend_from_slice(b" ");
+    let mut itoa_buf = itoa::Buffer::new();
+    buf.extend_from_slice(itoa_buf.format(payload_len).as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    buf.freeze()
+}
+
 pub fn format_msg(subject: &str, sid: &str, reply_to: Option<&str>, payload: &Bytes) -> Bytes {
     let payload_len = payload.len();
     let reply_len = reply_to.map_or(0, |rt| rt.len() + 1); // +1 for space
