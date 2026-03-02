@@ -324,3 +324,55 @@ Median delta:
 ### Notes
 - Net throughput impact is near-neutral in these runs (tiny deltas, high variance).
 - Protocol behavior check: non-ASCII non-CONNECT args now return `-ERR` consistently.
+
+---
+
+## 2026-03-02 — Batched writev queue (without BufWriter)
+
+Optimization scope:
+- **4.4** Move writer path from `BufWriter + write_all` to batched vectored writes over socket write half.
+- Maintain explicit flush policy in writer task:
+  - `FLUSH_THRESHOLD_BYTES = 64KB`
+  - `FLUSH_IDLE_MS = 1ms`
+- Queue pending writes as structured chunks and flush via `write_vectored` with partial-write handling.
+- Use larger vectored batch cap (`MAX_IO_SLICES = 1024`).
+
+### Benchmark: wide fan-out (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber-agg msg/s):
+- 50,948 / 2,430,933
+- 49,285 / 2,493,045
+- 50,089 / 2,520,881
+
+After (publisher / subscriber-agg msg/s):
+- 65,925 / 3,305,228
+- 65,614 / 3,322,424
+- 64,900 / 3,316,692
+
+Median delta:
+- Publisher: **50,089 -> 65,614** (**+31.0%**)
+- Subscriber aggregated: **2,493,045 -> 3,316,692** (**+33.0%**)
+
+### Benchmark: non-fanout many-subjects (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=1 TOPICS=5000 MSGS=2000000 SIZE=64 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber msg/s):
+- 1,797,616 / 1,802,078
+- 1,713,600 / 1,717,508
+- 1,784,167 / 1,784,934
+
+After (publisher / subscriber msg/s):
+- 1,601,232 / 1,603,900
+- 1,710,309 / 1,719,351
+- 1,766,405 / 1,771,934
+
+Median delta:
+- Publisher: **1,784,167 -> 1,710,309** (**-4.1%**)
+- Subscriber: **1,784,934 -> 1,719,351** (**-3.7%**)
+
+### Notes
+- This version strongly improves wide fan-out throughput, but regresses single-subscriber many-subject throughput.
+- Workload-driven tradeoff: keep as-is if wide fan-out is primary target; otherwise consider a hybrid writer path.
