@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::command::ServerCommand;
 use crate::error::ServerResult;
@@ -83,6 +83,12 @@ struct SubscriberDispatch {
     msg_header_prefix: Bytes,
 }
 
+#[derive(Debug)]
+struct CachedDispatch {
+    dispatches: Arc<Vec<SubscriberDispatch>>,
+    last_access_tick: AtomicU64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClientHandler {
     clients: Arc<DashMap<u64, mpsc::Sender<ServerCommand>>>,
@@ -97,17 +103,27 @@ pub struct ClientHandler {
     sid_map: Arc<DashMap<u64, DashMap<String, String>>>,
 
     // Cache resolved subscriber lists per publish subject
-    dispatch_cache: Arc<DashMap<String, Arc<Vec<SubscriberDispatch>>>>,
+    dispatch_cache: Arc<DashMap<String, Arc<CachedDispatch>>>,
+    dispatch_cache_capacity: usize,
+    dispatch_cache_tick: Arc<AtomicU64>,
+    dispatch_cache_evictions: Arc<AtomicU64>,
 }
 
 impl ClientHandler {
     const NUM_SUB_SHARDS: usize = 64;
+    const DEFAULT_DISPATCH_CACHE_CAPACITY: usize = 100_000;
 
     pub fn new() -> Self {
         let mut shards = Vec::with_capacity(Self::NUM_SUB_SHARDS);
         for _ in 0..Self::NUM_SUB_SHARDS {
             shards.push(RwLock::new(Self::create_submap()));
         }
+
+        let dispatch_cache_capacity = std::env::var("WISP_DISPATCH_CACHE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(Self::DEFAULT_DISPATCH_CACHE_CAPACITY);
 
         ClientHandler {
             clients: Arc::new(DashMap::new()),
@@ -116,6 +132,9 @@ impl ClientHandler {
             wildcard_has_subscribers: Arc::new(AtomicBool::new(false)),
             sid_map: Arc::new(DashMap::new()),
             dispatch_cache: Arc::new(DashMap::new()),
+            dispatch_cache_capacity,
+            dispatch_cache_tick: Arc::new(AtomicU64::new(0)),
+            dispatch_cache_evictions: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -135,6 +154,36 @@ impl ClientHandler {
         let mut hasher = AHasher::default();
         prefix.hash(&mut hasher);
         (hasher.finish() as usize) % Self::NUM_SUB_SHARDS
+    }
+
+    fn next_dispatch_cache_tick(&self) -> u64 {
+        self.dispatch_cache_tick.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn maybe_evict_dispatch_cache_entries(&self) {
+        while self.dispatch_cache.len() > self.dispatch_cache_capacity {
+            let mut lru_key: Option<String> = None;
+            let mut lru_tick = u64::MAX;
+
+            for entry in self.dispatch_cache.iter() {
+                let access_tick = entry.value().last_access_tick.load(Ordering::Relaxed);
+                if access_tick < lru_tick {
+                    lru_tick = access_tick;
+                    lru_key = Some(entry.key().clone());
+                }
+            }
+
+            let Some(key) = lru_key else {
+                break;
+            };
+
+            if self.dispatch_cache.remove(&key).is_none() {
+                break;
+            }
+
+            self.dispatch_cache_evictions
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn invalidate_dispatch_cache_for_subscription(&self, subscription: &str) {
@@ -321,15 +370,26 @@ impl ClientHandler {
     }
 
     async fn get_or_build_dispatches(&self, subject: &str) -> Arc<Vec<SubscriberDispatch>> {
+        let access_tick = self.next_dispatch_cache_tick();
+
         if let Some(entry) = self.dispatch_cache.get(subject) {
-            return Arc::clone(entry.value());
+            entry
+                .value()
+                .last_access_tick
+                .store(access_tick, Ordering::Relaxed);
+            return Arc::clone(&entry.value().dispatches);
         }
 
-        let dispatches = self.build_dispatches(subject).await;
-        let arc = Arc::new(dispatches);
-        self.dispatch_cache
-            .insert(subject.to_string(), Arc::clone(&arc));
-        arc
+        let dispatches = Arc::new(self.build_dispatches(subject).await);
+        self.dispatch_cache.insert(
+            subject.to_string(),
+            Arc::new(CachedDispatch {
+                dispatches: Arc::clone(&dispatches),
+                last_access_tick: AtomicU64::new(access_tick),
+            }),
+        );
+        self.maybe_evict_dispatch_cache_entries();
+        dispatches
     }
 }
 

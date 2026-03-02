@@ -213,3 +213,62 @@ Median delta:
 ### Notes
 - Results are noisy in fan-out subscriber aggregate throughput; publisher side trends positive.
 - Non-fanout scenario shows a strong positive shift across these runs.
+
+---
+
+## 2026-03-02 — Bounded dispatch cache with LRU-style eviction
+
+Optimization scope:
+- **3.7** Bound `dispatch_cache` size and evict least-recently-used style entries when over capacity.
+- Reworked cache value to store:
+  - `dispatches: Arc<Vec<SubscriberDispatch>>`
+  - `last_access_tick: AtomicU64`
+- Added access tick updates on cache hit and insertion-time eviction pass.
+- Capacity is configurable with env var:
+  - `WISP_DISPATCH_CACHE_CAPACITY` (default: `100000`).
+
+### Benchmark: wide fan-out (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber-agg msg/s):
+- 35,100 / 1,722,304
+- 33,516 / 1,619,411
+- 34,562 / 1,685,009
+
+After (publisher / subscriber-agg msg/s):
+- 35,253 / 1,707,313
+- 35,225 / 1,696,927
+- 32,946 / 1,677,228
+
+Median delta:
+- Publisher: **34,562 -> 35,225** (**+1.9%**)
+- Subscriber aggregated: **1,685,009 -> 1,696,927** (**+0.7%**)
+
+### Benchmark: non-fanout many-subjects (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=1 TOPICS=5000 MSGS=2000000 SIZE=64 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber msg/s):
+- 1,074,291 / 1,075,723
+- 1,122,518 / 1,125,808
+- 972,466 / 974,474
+
+After (publisher / subscriber msg/s):
+- 1,092,784 / 1,094,176
+- 1,079,488 / 1,081,630
+- 1,150,961 / 1,153,948
+
+Median delta:
+- Publisher: **1,074,291 -> 1,092,784** (**+1.7%**)
+- Subscriber: **1,075,723 -> 1,094,176** (**+1.7%**)
+
+### Capacity sanity check
+- Default cap (`100000`) with `5000` topics and `300000` msgs:
+  - Publisher: **600,930 msg/s**
+- Small cap (`WISP_DISPATCH_CACHE_CAPACITY=100`) on same workload:
+  - Publisher: **137,927 msg/s**
+
+Interpretation:
+- Bounded cache works as intended and prevents unbounded growth.
+- Very small caps materially hurt throughput in high-cardinality workloads due to frequent rebuilds.
