@@ -66,9 +66,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 cmd: ServerCommand,
                             ) -> std::io::Result<()> {
                                 match cmd {
-                                    ServerCommand::Send(bytes) => {
-                                        writer.write_all(&bytes).await
-                                    }
+                                    ServerCommand::Send(bytes) => writer.write_all(&bytes).await,
                                     ServerCommand::SendMessage { header, payload } => {
                                         writer.write_all(&header).await?;
                                         writer.write_all(&payload).await?;
@@ -89,10 +87,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 }
 
                                 if let Err(e) = write_command(&mut writer, cmd).await {
-                                    error!(
-                                        "[Client {} Writer] Error writing: {}",
-                                        client_id, e
-                                    );
+                                    error!("[Client {} Writer] Error writing: {}", client_id, e);
                                     break;
                                 }
 
@@ -105,7 +100,8 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                         );
                                         return;
                                     }
-                                    if let Err(e) = write_command(&mut writer, additional_cmd).await {
+                                    if let Err(e) = write_command(&mut writer, additional_cmd).await
+                                    {
                                         error!(
                                             "[Client {} Writer] Error writing pending: {}",
                                             client_id, e
@@ -115,10 +111,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 }
 
                                 if let Err(e) = writer.flush().await {
-                                    error!(
-                                        "[Client {} Writer] Error flushing: {}",
-                                        client_id, e
-                                    );
+                                    error!("[Client {} Writer] Error flushing: {}", client_id, e);
                                     break;
                                 }
                             }
@@ -348,29 +341,17 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
             let payload = payload_buffer.split_to(size).freeze();
             // Pass sender clone to handler
             self.handler
-                .handle_pub(
-                    self.id,
-                    &subject,
-                    reply_to.as_deref(),
-                    payload,
-                    &self.sender_to_writer,
-                )
+                .handle_pub(self.id, subject, reply_to, payload, &self.sender_to_writer)
                 .await?;
         } else if protocol::command_matches(command_bytes, b"SUB") {
             let (subject, queue_group, sid) = protocol::parse_sub_args(args_str)?;
             self.handler
-                .handle_sub(
-                    self.id,
-                    &subject,
-                    queue_group.as_deref(),
-                    &sid,
-                    &self.sender_to_writer,
-                )
+                .handle_sub(self.id, subject, queue_group, sid, &self.sender_to_writer)
                 .await?;
         } else if protocol::command_matches(command_bytes, b"UNSUB") {
             let (sid, max_msgs) = protocol::parse_unsub_args(args_str)?;
             self.handler
-                .handle_unsub(self.id, &sid, max_msgs, &self.sender_to_writer)
+                .handle_unsub(self.id, sid, max_msgs, &self.sender_to_writer)
                 .await?;
         } else if protocol::command_matches(command_bytes, b"PING") {
             if !args_str.is_empty() {

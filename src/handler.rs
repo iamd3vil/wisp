@@ -13,8 +13,6 @@ use tokio::sync::{RwLock, mpsc};
 
 /// Trait defining the callbacks for handling NATS client commands.
 /// Implement this trait to define the server's behavior.
-/// Trait defining the callbacks for handling NATS client commands.
-/// Implement this trait to define the server's behavior.
 #[async_trait]
 pub trait NatsServerHandler: Send + Sync + 'static {
     /// Called when a client issues a CONNECT command.
@@ -23,7 +21,7 @@ pub trait NatsServerHandler: Send + Sync + 'static {
         &self,
         client_id: u64,
         options: &ConnectOptions,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client issues a PUB command.
@@ -34,7 +32,7 @@ pub trait NatsServerHandler: Send + Sync + 'static {
         subject: &str,
         reply_to: Option<&str>,
         payload: Bytes,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client issues a SUB command.
@@ -45,7 +43,7 @@ pub trait NatsServerHandler: Send + Sync + 'static {
         subject: &str,
         queue_group: Option<&str>,
         sid: &str,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client issues an UNSUB command.
@@ -54,7 +52,7 @@ pub trait NatsServerHandler: Send + Sync + 'static {
         client_id: u64,
         sid: &str,
         max_msgs: Option<u64>,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client issues a PING command.
@@ -63,14 +61,14 @@ pub trait NatsServerHandler: Send + Sync + 'static {
     async fn handle_ping(
         &self,
         client_id: u64,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client issues a PONG command.
     async fn handle_pong(
         &self,
         client_id: u64,
-        sender: &mpsc::Sender<ServerCommand>, // <-- Add sender
+        sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()>;
 
     /// Called when a client connection is closed (normally or due to error).
@@ -85,13 +83,8 @@ struct SubscriberDispatch {
     sid: Arc<str>,
 }
 
-// --- Example Handler Implementation ---
-
-/// A simple handler that just prints received commands.
 #[derive(Debug, Clone)]
 pub struct ClientHandler {
-    // Client IDs - using DashMap for lock-free concurrent access
-    // Now stores direct connection to client writer tasks
     clients: Arc<DashMap<u64, mpsc::Sender<ServerCommand>>>,
 
     // Sharded subscription maps to reduce contention on hot paths
@@ -110,7 +103,6 @@ pub struct ClientHandler {
 impl ClientHandler {
     const NUM_SUB_SHARDS: usize = 64;
 
-    /// Creates a new instance of `ClientHandler`.
     pub fn new() -> Self {
         let mut shards = Vec::with_capacity(Self::NUM_SUB_SHARDS);
         for _ in 0..Self::NUM_SUB_SHARDS {
@@ -145,8 +137,91 @@ impl ClientHandler {
         (hasher.finish() as usize) % Self::NUM_SUB_SHARDS
     }
 
-    fn invalidate_dispatch_cache(&self) {
-        self.dispatch_cache.clear();
+    fn invalidate_dispatch_cache_for_subscription(&self, subscription: &str) {
+        if !protocol::subject_contains_wildcard(subscription) {
+            self.dispatch_cache.remove(subscription);
+            return;
+        }
+
+        let keys_to_remove: Vec<String> = self
+            .dispatch_cache
+            .iter()
+            .filter_map(|entry| {
+                if Self::subject_matches(subscription, entry.key()) {
+                    return Some(entry.key().clone());
+                }
+                None
+            })
+            .collect();
+
+        for key in keys_to_remove {
+            self.dispatch_cache.remove(&key);
+        }
+    }
+
+    fn invalidate_dispatch_cache_for_subscriptions(&self, subscriptions: &[String]) {
+        for subscription in subscriptions {
+            self.invalidate_dispatch_cache_for_subscription(subscription);
+        }
+    }
+
+    fn client_subjects(&self, client_id: u64) -> Vec<String> {
+        let Some(subject_map) = self.sid_map.get(&client_id) else {
+            return Vec::new();
+        };
+
+        subject_map
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    fn find_subject_for_sid(&self, client_id: u64, sid: &str) -> Option<String> {
+        let subject_map = self.sid_map.get(&client_id)?;
+
+        for entry in subject_map.iter() {
+            if entry.value().as_str() == sid {
+                return Some(entry.key().clone());
+            }
+        }
+
+        None
+    }
+
+    async fn remove_subscription_from_shard(&self, client_id: u64, subject: &str) {
+        let prefix = Self::subject_prefix(subject);
+
+        if Self::is_wildcard_prefix(prefix) {
+            let mut shard = self.wildcard_subscriptions.write().await;
+            shard.unsubscribe(subject, &client_id);
+
+            if shard.list_topics(&client_id).is_empty() {
+                shard.unregister_client(&client_id);
+            }
+
+            self.wildcard_has_subscribers
+                .store(shard.subscription_count() > 0, Ordering::Relaxed);
+            return;
+        }
+
+        let idx = Self::shard_index(prefix);
+        let mut shard = self.subscriptions[idx].write().await;
+        shard.unsubscribe(subject, &client_id);
+
+        if shard.list_topics(&client_id).is_empty() {
+            shard.unregister_client(&client_id);
+        }
+    }
+
+    async fn unregister_client_from_all_shards(&self, client_id: u64) {
+        for shard in self.subscriptions.iter() {
+            shard.write().await.unregister_client(&client_id);
+        }
+
+        let mut wildcard_shard = self.wildcard_subscriptions.write().await;
+        wildcard_shard.unregister_client(&client_id);
+        self.wildcard_has_subscribers
+            .store(wildcard_shard.subscription_count() > 0, Ordering::Relaxed);
     }
 
     fn resolve_sid_for_subject(&self, client_id: u64, subject: &str) -> Option<Arc<str>> {
@@ -286,12 +361,8 @@ impl NatsServerHandler for ClientHandler {
         let payload_len = payload.len();
 
         for dispatch in dispatches.iter() {
-            let header = protocol::format_msg_header(
-                subject,
-                dispatch.sid.as_ref(),
-                reply_to,
-                payload_len,
-            );
+            let header =
+                protocol::format_msg_header(subject, dispatch.sid.as_ref(), reply_to, payload_len);
             let msg = ServerCommand::SendMessage {
                 header,
                 payload: payload.clone(),
@@ -300,15 +371,11 @@ impl NatsServerHandler for ClientHandler {
             match dispatch.sender.try_send(msg) {
                 Ok(_) => {}
                 Err(mpsc::error::TrySendError::Closed(_cmd)) => {
-                    self.clients.remove(&dispatch.client_id);
-                    self.sid_map.remove(&dispatch.client_id);
-                    self.invalidate_dispatch_cache();
+                    self.handle_disconnect(dispatch.client_id).await;
                 }
                 Err(mpsc::error::TrySendError::Full(cmd)) => {
                     if dispatch.sender.send(cmd).await.is_err() {
-                        self.clients.remove(&dispatch.client_id);
-                        self.sid_map.remove(&dispatch.client_id);
-                        self.invalidate_dispatch_cache();
+                        self.handle_disconnect(dispatch.client_id).await;
                     }
                 }
             }
@@ -330,10 +397,8 @@ impl NatsServerHandler for ClientHandler {
             client_id, subject, queue_group, sid
         );
 
-        // Store the client's writer channel directly (no per-subscription channels)
         self.clients.insert(client_id, sender.clone());
 
-        // Register the client's interest in this subject on shard that matches the prefix
         let prefix = Self::subject_prefix(subject);
 
         if Self::is_wildcard_prefix(prefix) {
@@ -352,11 +417,10 @@ impl NatsServerHandler for ClientHandler {
             }
         }
 
-        // Store the SID mapping for this subscription
         let subject_map = self.sid_map.entry(client_id).or_insert_with(DashMap::new);
         subject_map.insert(subject.to_string(), sid.to_string());
 
-        self.invalidate_dispatch_cache();
+        self.invalidate_dispatch_cache_for_subscription(subject);
 
         Ok(())
     }
@@ -372,7 +436,37 @@ impl NatsServerHandler for ClientHandler {
             "[Client {}] UNSUB SID: '{}', MaxMsgs: {:?}",
             client_id, sid, max_msgs
         );
-        self.invalidate_dispatch_cache();
+
+        if let Some(limit) = max_msgs {
+            if limit > 0 {
+                println!(
+                    "[Client {}] UNSUB with max_msgs={} is not implemented yet for SID '{}'",
+                    client_id, limit, sid
+                );
+                return Ok(());
+            }
+        }
+
+        let Some(subject) = self.find_subject_for_sid(client_id, sid) else {
+            return Ok(());
+        };
+
+        self.remove_subscription_from_shard(client_id, &subject)
+            .await;
+
+        let mut remove_sid_entry = false;
+        if let Some(subject_map) = self.sid_map.get(&client_id) {
+            subject_map.remove(&subject);
+            remove_sid_entry = subject_map.is_empty();
+        }
+
+        if remove_sid_entry {
+            self.sid_map.remove(&client_id);
+            self.unregister_client_from_all_shards(client_id).await;
+        }
+
+        self.invalidate_dispatch_cache_for_subscription(&subject);
+
         Ok(())
     }
 
@@ -395,26 +489,14 @@ impl NatsServerHandler for ClientHandler {
     }
 
     async fn handle_disconnect(&self, client_id: u64) {
-        // Remove the client from the clients map
+        let subjects = self.client_subjects(client_id);
+
         self.clients.remove(&client_id);
-
-        // Remove all SID mappings for this client
         self.sid_map.remove(&client_id);
+        self.unregister_client_from_all_shards(client_id).await;
 
-        // Unregister client from subscriptions
-        for shard in self.subscriptions.iter() {
-            shard.write().await.unregister_client(&client_id);
-        }
-        {
-            let mut shard = self.wildcard_subscriptions.write().await;
-            shard.unregister_client(&client_id);
-            if self.wildcard_has_subscribers.load(Ordering::Relaxed) && shard.is_empty() {
-                self.wildcard_has_subscribers
-                    .store(false, Ordering::Relaxed);
-            }
-        }
         println!("[Client {}] Disconnected", client_id);
 
-        self.invalidate_dispatch_cache();
+        self.invalidate_dispatch_cache_for_subscriptions(&subjects);
     }
 }

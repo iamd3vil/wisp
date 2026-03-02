@@ -147,20 +147,18 @@ pub fn subject_contains_wildcard(subject: &str) -> bool {
 }
 
 /// Helper function to parse PUB command arguments from the arguments string.
-/// Returns (subject, reply_to, size)
-/// Optimized: Avoids intermediate Vec allocation.
-pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, usize)> {
-    // Use split_ascii_whitespace for potentially better performance on ASCII text.
+/// Returns (subject, reply_to, size) as borrows into `args_str`.
+/// Optimized: avoids String allocations on the hot path.
+pub fn parse_pub_args(args_str: &str) -> ServerResult<(&str, Option<&str>, usize)> {
     let mut parts = args_str.split_ascii_whitespace();
 
     let subject = parts.next();
-    let part2 = parts.next(); // Could be reply_to or size
-    let part3 = parts.next(); // Could be size or None
-    let trailing = parts.next(); // Should be None
+    let part2 = parts.next();
+    let part3 = parts.next();
+    let trailing = parts.next();
 
     match (subject, part2, part3, trailing) {
         (Some(subj), Some(size_str), None, None) => {
-            // PUB <subject> <size>
             if subject_contains_wildcard(subj) {
                 return Err(ServerError::InvalidArgument {
                     command: "PUB".to_string(),
@@ -173,10 +171,9 @@ pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, u
                     command: "PUB".to_string(),
                     argument: format!("Invalid size: {}", size_str),
                 })?;
-            Ok((subj.to_string(), None, size)) // Allocate final Strings here
+            Ok((subj, None, size))
         }
         (Some(subj), Some(reply), Some(size_str), None) => {
-            // PUB <subject> <reply-to> <size>
             if subject_contains_wildcard(subj) {
                 return Err(ServerError::InvalidArgument {
                     command: "PUB".to_string(),
@@ -189,7 +186,7 @@ pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, u
                     command: "PUB".to_string(),
                     argument: format!("Invalid size: {}", size_str),
                 })?;
-            Ok((subj.to_string(), Some(reply.to_string()), size)) // Allocate final Strings here
+            Ok((subj, Some(reply), size))
         }
         _ => Err(ServerError::InvalidCommand(format!(
             "Incorrect number/format of arguments for PUB: '{}'",
@@ -199,25 +196,18 @@ pub fn parse_pub_args(args_str: &str) -> ServerResult<(String, Option<String>, u
 }
 
 /// Helper function to parse SUB command arguments from the arguments string.
-/// Returns (subject, queue_group, sid)
-/// Optimized: Avoids intermediate Vec allocation.
-pub fn parse_sub_args(args_str: &str) -> ServerResult<(String, Option<String>, String)> {
+/// Returns (subject, queue_group, sid) as borrows into `args_str`.
+pub fn parse_sub_args(args_str: &str) -> ServerResult<(&str, Option<&str>, &str)> {
     let mut parts = args_str.split_ascii_whitespace();
 
     let subject = parts.next();
-    let part2 = parts.next(); // Could be queue_group or sid
-    let part3 = parts.next(); // Could be sid or None
-    let trailing = parts.next(); // Should be None
+    let part2 = parts.next();
+    let part3 = parts.next();
+    let trailing = parts.next();
 
     match (subject, part2, part3, trailing) {
-        (Some(subj), Some(sid_str), None, None) => {
-            // SUB <subject> <sid>
-            Ok((subj.to_string(), None, sid_str.to_string())) // Allocate final Strings
-        }
-        (Some(subj), Some(qg), Some(sid_str), None) => {
-            // SUB <subject> <queue_group> <sid>
-            Ok((subj.to_string(), Some(qg.to_string()), sid_str.to_string())) // Allocate final Strings
-        }
+        (Some(subj), Some(sid_str), None, None) => Ok((subj, None, sid_str)),
+        (Some(subj), Some(qg), Some(sid_str), None) => Ok((subj, Some(qg), sid_str)),
         _ => Err(ServerError::InvalidCommand(format!(
             "Incorrect number/format of arguments for SUB: '{}'",
             args_str
@@ -226,29 +216,24 @@ pub fn parse_sub_args(args_str: &str) -> ServerResult<(String, Option<String>, S
 }
 
 /// Helper function to parse UNSUB command arguments from the arguments string.
-/// Returns (sid, max_msgs)
-/// Optimized: Avoids intermediate Vec allocation.
-pub fn parse_unsub_args(args_str: &str) -> ServerResult<(String, Option<u64>)> {
+/// Returns (sid, max_msgs) as borrows into `args_str`.
+pub fn parse_unsub_args(args_str: &str) -> ServerResult<(&str, Option<u64>)> {
     let mut parts = args_str.split_ascii_whitespace();
 
     let sid_str = parts.next();
     let max_msgs_str = parts.next();
-    let trailing = parts.next(); // Should be None
+    let trailing = parts.next();
 
     match (sid_str, max_msgs_str, trailing) {
-        (Some(sid), None, None) => {
-            // UNSUB <sid>
-            Ok((sid.to_string(), None)) // Allocate final String
-        }
+        (Some(sid), None, None) => Ok((sid, None)),
         (Some(sid), Some(max_str), None) => {
-            // UNSUB <sid> <max_msgs>
             let max_msgs = max_str
                 .parse::<u64>()
                 .map_err(|_| ServerError::InvalidArgument {
                     command: "UNSUB".to_string(),
                     argument: format!("Invalid max_msgs: {}", max_str),
                 })?;
-            Ok((sid.to_string(), Some(max_msgs))) // Allocate final String
+            Ok((sid, Some(max_msgs)))
         }
         _ => Err(ServerError::InvalidCommand(format!(
             "Incorrect number/format of arguments for UNSUB: '{}'",
