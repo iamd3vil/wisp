@@ -80,3 +80,34 @@ Churn summary (publisher):
 - Multi-run data confirms noticeable run-to-run variance on this machine.
 - Under the persistent churn harness, throughput is ~3.5% lower than no-churn at the median.
 - Expected impact of 3.4 remains allocation reduction first; throughput deltas are secondary and noisy without allocation profiling.
+
+---
+
+## 2026-03-02 — Pre-cached MSG header prefix in dispatch cache
+
+Optimization scope:
+- **3.2** Cache `MSG <subject> <sid> ` as `Bytes` in `SubscriberDispatch` at dispatch-cache build time.
+- In `handle_pub`, compute payload size string once (`itoa`) and assemble headers from cached prefix:
+  - no-reply fast path: `prefix + size + CRLF`
+  - reply path: `prefix + reply_to + space + size + CRLF`
+
+Benchmark scenario (wide fan-out):
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher/subscriber-agg msg/s):
+- run1: 18,877 / 944,200
+- run2: 19,019 / 928,603
+- run3: 19,329 / 942,232
+
+After (publisher/subscriber-agg msg/s):
+- run1: 33,972 / 1,630,238
+- run2: 32,311 / 1,550,252
+- run3: 33,729 / 1,615,882
+
+Summary:
+- Publisher median: **19,019 -> 33,729** (**+77.3%**)
+- Subscriber aggregated median: **942,232 -> 1,615,882** (**+71.5%**)
+
+Sanity check (non-fanout workload):
+- `1 pub / 1 sub / 5000 topics / 2,000,000 msgs / 64B`
+- Post-change run: **958,007 msg/s** publisher, **956,782 msg/s** subscriber.

@@ -261,34 +261,62 @@ pub fn parse_connect_args(args_str: &str) -> ServerResult<ConnectOptions> {
     serde_json::from_str(args_str).map_err(ServerError::JsonError)
 }
 
+pub fn format_msg_header_prefix(subject: &str, sid: &str) -> Bytes {
+    let prefix_len = 4 + subject.len() + 1 + sid.len() + 1;
+    let mut buf = BytesMut::with_capacity(prefix_len);
+
+    buf.extend_from_slice(b"MSG ");
+    buf.extend_from_slice(subject.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(sid.as_bytes());
+    buf.extend_from_slice(b" ");
+
+    buf.freeze()
+}
+
+pub fn format_msg_header_no_reply(msg_header_prefix: &Bytes, payload_size_str: &str) -> Bytes {
+    let header_len = msg_header_prefix.len() + payload_size_str.len() + 2;
+    let mut buf = BytesMut::with_capacity(header_len);
+
+    buf.extend_from_slice(msg_header_prefix);
+    buf.extend_from_slice(payload_size_str.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    buf.freeze()
+}
+
+pub fn format_msg_header_with_reply(
+    msg_header_prefix: &Bytes,
+    reply_to: &str,
+    payload_size_str: &str,
+) -> Bytes {
+    let header_len = msg_header_prefix.len() + reply_to.len() + 1 + payload_size_str.len() + 2;
+    let mut buf = BytesMut::with_capacity(header_len);
+
+    buf.extend_from_slice(msg_header_prefix);
+    buf.extend_from_slice(reply_to.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(payload_size_str.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    buf.freeze()
+}
+
 pub fn format_msg_header(
     subject: &str,
     sid: &str,
     reply_to: Option<&str>,
     payload_len: usize,
 ) -> Bytes {
-    let reply_len = reply_to.map_or(0, |rt| rt.len() + 1);
-    let size_digits_estimate = 10;
-    let header_len = 4 + subject.len() + 1 + sid.len() + reply_len + 1 + size_digits_estimate + 2;
+    let msg_header_prefix = format_msg_header_prefix(subject, sid);
+    let mut payload_size_buf = itoa::Buffer::new();
+    let payload_size_str = payload_size_buf.format(payload_len);
 
-    let mut buf = BytesMut::with_capacity(header_len);
-
-    buf.extend_from_slice(b"MSG ");
-    buf.extend_from_slice(subject.as_bytes());
-    buf.extend_from_slice(b" ");
-    buf.extend_from_slice(sid.as_bytes());
-
-    if let Some(rt) = reply_to {
-        buf.extend_from_slice(b" ");
-        buf.extend_from_slice(rt.as_bytes());
+    if let Some(reply_to) = reply_to {
+        return format_msg_header_with_reply(&msg_header_prefix, reply_to, payload_size_str);
     }
 
-    buf.extend_from_slice(b" ");
-    let mut itoa_buf = itoa::Buffer::new();
-    buf.extend_from_slice(itoa_buf.format(payload_len).as_bytes());
-    buf.extend_from_slice(b"\r\n");
-
-    buf.freeze()
+    format_msg_header_no_reply(&msg_header_prefix, payload_size_str)
 }
 
 pub fn format_msg(subject: &str, sid: &str, reply_to: Option<&str>, payload: &Bytes) -> Bytes {

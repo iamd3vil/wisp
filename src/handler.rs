@@ -80,7 +80,7 @@ pub trait NatsServerHandler: Send + Sync + 'static {
 struct SubscriberDispatch {
     client_id: u64,
     sender: mpsc::Sender<ServerCommand>,
-    sid: Arc<str>,
+    msg_header_prefix: Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -307,11 +307,12 @@ impl ClientHandler {
                 let sid = self
                     .resolve_sid_for_subject(client_id, subject)
                     .unwrap_or_else(|| Arc::<str>::from("1"));
+                let msg_header_prefix = protocol::format_msg_header_prefix(subject, sid.as_ref());
 
                 dispatches.push(SubscriberDispatch {
                     client_id,
                     sender,
-                    sid,
+                    msg_header_prefix,
                 });
             }
         }
@@ -359,10 +360,40 @@ impl NatsServerHandler for ClientHandler {
         }
 
         let payload_len = payload.len();
+        let mut payload_size_buf = itoa::Buffer::new();
+        let payload_size_str = payload_size_buf.format(payload_len);
+
+        if let Some(reply_to) = reply_to {
+            for dispatch in dispatches.iter() {
+                let header = protocol::format_msg_header_with_reply(
+                    &dispatch.msg_header_prefix,
+                    reply_to,
+                    payload_size_str,
+                );
+                let msg = ServerCommand::SendMessage {
+                    header,
+                    payload: payload.clone(),
+                };
+
+                match dispatch.sender.try_send(msg) {
+                    Ok(_) => {}
+                    Err(mpsc::error::TrySendError::Closed(_cmd)) => {
+                        self.handle_disconnect(dispatch.client_id).await;
+                    }
+                    Err(mpsc::error::TrySendError::Full(cmd)) => {
+                        if dispatch.sender.send(cmd).await.is_err() {
+                            self.handle_disconnect(dispatch.client_id).await;
+                        }
+                    }
+                }
+            }
+
+            return Ok(());
+        }
 
         for dispatch in dispatches.iter() {
             let header =
-                protocol::format_msg_header(subject, dispatch.sid.as_ref(), reply_to, payload_len);
+                protocol::format_msg_header_no_reply(&dispatch.msg_header_prefix, payload_size_str);
             let msg = ServerCommand::SendMessage {
                 header,
                 payload: payload.clone(),
