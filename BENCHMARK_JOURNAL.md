@@ -111,3 +111,105 @@ Summary:
 Sanity check (non-fanout workload):
 - `1 pub / 1 sub / 5000 topics / 2,000,000 msgs / 64B`
 - Post-change run: **958,007 msg/s** publisher, **956,782 msg/s** subscriber.
+
+---
+
+## 2026-03-02 — Writer flush coalescing + larger BufWriter
+
+Optimization scope:
+- **3.6** Writer dual-trigger flushing:
+  - `FLUSH_THRESHOLD_BYTES = 32KB`
+  - `FLUSH_IDLE_MS = 1ms`
+- Increase writer buffer capacity from **8KB -> 64KB**.
+- Writer now tracks buffered byte count and flushes:
+  - on threshold (throughput)
+  - on idle timer (latency bound)
+  - on shutdown/channel close (correctness)
+
+### Benchmark: wide fan-out (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber-agg msg/s):
+- 32,450 / 1,558,261
+- 33,311 / 1,597,583
+- 32,252 / 1,546,583
+
+After (publisher / subscriber-agg msg/s):
+- 33,652 / 1,721,808
+- 34,985 / 1,714,063
+- 32,892 / 1,582,829
+
+Median delta:
+- Publisher: **32,450 -> 33,652** (**+3.7%**)
+- Subscriber aggregated: **1,558,261 -> 1,714,063** (**+10.0%**)
+
+### Benchmark: non-fanout many-subjects (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=1 TOPICS=5000 MSGS=2000000 SIZE=64 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber msg/s):
+- 1,010,504 / 1,009,279
+- 807,148 / 806,117
+- 960,727 / 961,197
+
+After (publisher / subscriber msg/s):
+- 980,778 / 992,004
+- 971,253 / 973,597
+- 868,506 / 869,620
+
+Median delta:
+- Publisher: **960,727 -> 971,253** (**+1.1%**)
+- Subscriber: **961,197 -> 973,597** (**+1.3%**)
+
+---
+
+## 2026-03-02 — Reader payload buffer reuse (PUB read path)
+
+Optimization scope:
+- **3.5** Hoist `BytesMut` payload read buffer onto `ClientConnectionLogic` and reuse across PUB commands.
+- Replace per-PUB local allocation with:
+  - `clear()`
+  - `reserve(size + 2)`
+  - `resize(size + 2, 0)`
+  - `read_exact(...)`
+
+### Benchmark: wide fan-out (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber-agg msg/s):
+- 33,652 / 1,721,808
+- 34,985 / 1,714,063
+- 32,892 / 1,582,829
+
+After (publisher / subscriber-agg msg/s):
+- 35,100 / 1,722,304
+- 33,516 / 1,619,411
+- 34,562 / 1,685,009
+
+Median delta:
+- Publisher: **33,652 -> 34,562** (**+2.7%**)
+- Subscriber aggregated: **1,714,063 -> 1,685,009** (**-1.7%**)
+
+### Benchmark: non-fanout many-subjects (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=1 TOPICS=5000 MSGS=2000000 SIZE=64 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber msg/s):
+- 980,778 / 992,004
+- 971,253 / 973,597
+- 868,506 / 869,620
+
+After (publisher / subscriber msg/s):
+- 1,074,291 / 1,075,723
+- 1,122,518 / 1,125,808
+- 972,466 / 974,474
+
+Median delta:
+- Publisher: **971,253 -> 1,074,291** (**+10.6%**)
+- Subscriber: **973,597 -> 1,075,723** (**+10.5%**)
+
+### Notes
+- Results are noisy in fan-out subscriber aggregate throughput; publisher side trends positive.
+- Non-fanout scenario shows a strong positive shift across these runs.

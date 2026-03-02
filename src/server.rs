@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn}; // For potential timeouts
+use tokio::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
 
 lazy_static::lazy_static! {
     static ref NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -58,63 +59,156 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                             mpsc::channel::<ServerCommand>(CHANNEL_BUF_SIZE);
 
                         tokio::spawn(async move {
-                            let mut writer = BufWriter::with_capacity(8192, write_stream);
+                            const WRITER_BUF_CAPACITY: usize = 64 * 1024;
+                            const FLUSH_THRESHOLD_BYTES: usize = 32 * 1024;
+                            const FLUSH_IDLE_MS: u64 = 1;
                             const CRLF: &[u8] = b"\r\n";
+
+                            let mut writer =
+                                BufWriter::with_capacity(WRITER_BUF_CAPACITY, write_stream);
+                            let mut pending_bytes = 0usize;
+                            let mut flush_deadline: Option<Instant> = None;
 
                             async fn write_command(
                                 writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
                                 cmd: ServerCommand,
-                            ) -> std::io::Result<()> {
+                            ) -> std::io::Result<usize> {
                                 match cmd {
-                                    ServerCommand::Send(bytes) => writer.write_all(&bytes).await,
+                                    ServerCommand::Send(bytes) => {
+                                        writer.write_all(&bytes).await?;
+                                        Ok(bytes.len())
+                                    }
                                     ServerCommand::SendMessage { header, payload } => {
                                         writer.write_all(&header).await?;
                                         writer.write_all(&payload).await?;
-                                        writer.write_all(CRLF).await
+                                        writer.write_all(CRLF).await?;
+                                        Ok(header.len() + payload.len() + CRLF.len())
                                     }
-                                    ServerCommand::Shutdown => Ok(()),
+                                    ServerCommand::Shutdown => Ok(0),
                                 }
                             }
 
-                            while let Some(cmd) = write_task_rx.recv().await {
+                            async fn flush_pending(
+                                writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+                                pending_bytes: &mut usize,
+                            ) -> std::io::Result<()> {
+                                if *pending_bytes == 0 {
+                                    return Ok(());
+                                }
+
+                                writer.flush().await?;
+                                *pending_bytes = 0;
+                                Ok(())
+                            }
+
+                            loop {
+                                let cmd = match flush_deadline {
+                                    Some(deadline) => {
+                                        tokio::select! {
+                                            maybe_cmd = write_task_rx.recv() => maybe_cmd,
+                                            _ = tokio::time::sleep_until(deadline) => {
+                                                if let Err(e) = flush_pending(&mut writer, &mut pending_bytes).await {
+                                                    error!("[Client {} Writer] Error flushing on timer: {}", client_id, e);
+                                                    break;
+                                                }
+                                                flush_deadline = None;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    None => write_task_rx.recv().await,
+                                };
+
+                                let Some(cmd) = cmd else {
+                                    if let Err(e) =
+                                        flush_pending(&mut writer, &mut pending_bytes).await
+                                    {
+                                        error!(
+                                            "[Client {} Writer] Error flushing on channel close: {}",
+                                            client_id, e
+                                        );
+                                    }
+                                    break;
+                                };
+
                                 if matches!(cmd, ServerCommand::Shutdown) {
                                     debug!(
                                         "[Client {} Writer] Shutdown command received.",
                                         client_id
                                     );
-                                    let _ = writer.flush().await;
+                                    if let Err(e) =
+                                        flush_pending(&mut writer, &mut pending_bytes).await
+                                    {
+                                        error!(
+                                            "[Client {} Writer] Error flushing on shutdown: {}",
+                                            client_id, e
+                                        );
+                                    }
                                     break;
                                 }
 
-                                if let Err(e) = write_command(&mut writer, cmd).await {
-                                    error!("[Client {} Writer] Error writing: {}", client_id, e);
-                                    break;
+                                match write_command(&mut writer, cmd).await {
+                                    Ok(bytes_written) => {
+                                        pending_bytes += bytes_written;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "[Client {} Writer] Error writing: {}",
+                                            client_id, e
+                                        );
+                                        break;
+                                    }
                                 }
 
                                 while let Ok(additional_cmd) = write_task_rx.try_recv() {
                                     if matches!(additional_cmd, ServerCommand::Shutdown) {
-                                        let _ = writer.flush().await;
                                         debug!(
                                             "[Client {} Writer] Shutdown command received.",
                                             client_id
                                         );
+                                        if let Err(e) =
+                                            flush_pending(&mut writer, &mut pending_bytes).await
+                                        {
+                                            error!(
+                                                "[Client {} Writer] Error flushing on shutdown: {}",
+                                                client_id, e
+                                            );
+                                        }
                                         return;
                                     }
-                                    if let Err(e) = write_command(&mut writer, additional_cmd).await
-                                    {
-                                        error!(
-                                            "[Client {} Writer] Error writing pending: {}",
-                                            client_id, e
-                                        );
-                                        return;
+
+                                    match write_command(&mut writer, additional_cmd).await {
+                                        Ok(bytes_written) => {
+                                            pending_bytes += bytes_written;
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "[Client {} Writer] Error writing pending: {}",
+                                                client_id, e
+                                            );
+                                            return;
+                                        }
                                     }
                                 }
 
-                                if let Err(e) = writer.flush().await {
-                                    error!("[Client {} Writer] Error flushing: {}", client_id, e);
-                                    break;
+                                if pending_bytes >= FLUSH_THRESHOLD_BYTES {
+                                    if let Err(e) =
+                                        flush_pending(&mut writer, &mut pending_bytes).await
+                                    {
+                                        error!(
+                                            "[Client {} Writer] Error flushing on threshold: {}",
+                                            client_id, e
+                                        );
+                                        break;
+                                    }
+                                    flush_deadline = None;
+                                    continue;
                                 }
+
+                                flush_deadline =
+                                    Some(Instant::now() + Duration::from_millis(FLUSH_IDLE_MS));
                             }
+
                             debug!("[Client {} Writer] Writer task finished.", client_id);
                         });
 
@@ -123,11 +217,11 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                         let mut connection_logic = ClientConnectionLogic {
                             id: client_id,
                             reader,
-                            // writer: writer, // Writer is handled by the separate task now
+                            payload_buffer: BytesMut::with_capacity(1024),
                             handler: handler_clone,
                             server_info: server_info_clone,
                             connect_options: None,
-                            sender_to_writer: write_task_tx, // Use this sender to talk to the writer task
+                            sender_to_writer: write_task_tx,
                         };
 
                         if let Err(e) = connection_logic.process_incoming().await {
@@ -179,11 +273,11 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
 struct ClientConnectionLogic<H: NatsServerHandler> {
     id: u64,
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    // writer: Arc<tokio::sync::Mutex<BufWriter<tokio::net::tcp::WriteHalf<'static>>>>, // No longer needed here
+    payload_buffer: BytesMut,
     handler: Arc<H>,
     server_info: Arc<ServerInfo>,
     connect_options: Option<ConnectOptions>,
-    sender_to_writer: mpsc::Sender<ServerCommand>, // Sender to communicate with the writer task
+    sender_to_writer: mpsc::Sender<ServerCommand>,
 }
 
 impl<H: NatsServerHandler> ClientConnectionLogic<H> {
@@ -328,18 +422,22 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
             self.connect_options = Some(options); // Store options after successful handling
         } else if protocol::command_matches(command_bytes, b"PUB") {
             let (subject, reply_to, size) = protocol::parse_pub_args(args_str)?;
-            // Read payload
-            let mut payload_buffer = BytesMut::with_capacity(size + 2);
-            payload_buffer.resize(size + 2, 0);
-            self.reader.read_exact(&mut payload_buffer).await?; // Read from reader half
 
-            if &payload_buffer[size..] != b"\r\n" {
+            let payload_with_crlf = size + 2;
+            self.payload_buffer.clear();
+            self.payload_buffer.reserve(payload_with_crlf);
+            self.payload_buffer.resize(payload_with_crlf, 0);
+            self.reader.read_exact(&mut self.payload_buffer).await?;
+
+            if &self.payload_buffer[size..] != b"\r\n" {
                 return Err(ServerError::InvalidProtocol(
                     "PUB payload not followed by CRLF".to_string(),
                 ));
             }
-            let payload = payload_buffer.split_to(size).freeze();
-            // Pass sender clone to handler
+
+            let payload = self.payload_buffer.split_to(size).freeze();
+            self.payload_buffer.clear();
+
             self.handler
                 .handle_pub(self.id, subject, reply_to, payload, &self.sender_to_writer)
                 .await?;
