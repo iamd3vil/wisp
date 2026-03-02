@@ -6,10 +6,17 @@ use bytes::Bytes; // Make sure Bytes is imported
 pub enum ServerCommand {
     /// Send these specific bytes to the client.
     Send(Bytes),
-    /// Send a message with separate header and shared payload (zero-copy optimization).
-    /// Header contains: MSG <subject> <sid> [reply-to] <size>\r\n
-    /// Payload is shared across all subscribers via Bytes refcount.
-    SendMessage { header: Bytes, payload: Bytes },
+    /// Send a message using pre-split protocol parts.
+    ///
+    /// `header_prefix` contains: `MSG <subject> <sid> `
+    /// If `reply_to` is present, writer sends: `<reply_to> ` between prefix and payload size.
+    /// `payload` is shared across subscribers via Bytes refcount.
+    SendMessage {
+        header_prefix: Bytes,
+        reply_to: Option<Bytes>,
+        payload_len: usize,
+        payload: Bytes,
+    },
     /// Instruct the client connection task to shut down gracefully.
     Shutdown,
 }

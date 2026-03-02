@@ -376,3 +376,168 @@ Median delta:
 ### Notes
 - This version strongly improves wide fan-out throughput, but regresses single-subscriber many-subject throughput.
 - Workload-driven tradeoff: keep as-is if wide fan-out is primary target; otherwise consider a hybrid writer path.
+
+---
+
+## 2026-03-02 — Wisp vs NATS (wide fan-out, 5-run comparison)
+
+Workload:
+- `1 pub / 100 sub / 1 topic / 30000 msgs / 128B`
+
+Method:
+- 5 runs each for `nats-server` and `wisp`.
+- Metrics from `nats bench` output (publisher stats + subscriber aggregated stats).
+- Approximate server CPU/RSS sampled via `ps -p <pid> -o %cpu,rss` every 100ms during each run.
+- Raw data saved to: `profiling/compare/wide100_5run_compare.json`.
+
+NATS runs (pub / sub-agg / avg us / p99 us / p99.9 us):
+- 31,950 / 3,185,057 / 8.80 / 0.23 / 8.85
+- 31,541 / 3,135,388 / 8.58 / 0.28 / 7.32
+- 31,336 / 3,115,821 / 8.98 / 0.20 / 7.96
+- 30,354 / 3,027,699 / 9.35 / 0.27 / 10.68
+- 29,656 / 2,953,378 / 9.83 / 3.69 / 6.49
+
+Wisp runs (pub / sub-agg / avg us / p99 us / p99.9 us):
+- 31,046 / 3,142,669 / 9.63 / 0.37 / 12.59
+- 31,217 / 3,170,163 / 9.23 / 0.61 / 14.96
+- 30,144 / 3,060,033 / 8.65 / 0.71 / 19.18
+- 30,498 / 3,085,589 / 9.25 / 0.27 / 6.76
+- 30,768 / 3,089,843 / 9.29 / 0.21 / 6.16
+
+Median summary:
+- NATS:
+  - pub: **31,336 msg/s**
+  - sub-agg: **3,115,821 msg/s**
+  - avg: **8.98 us**
+  - p99: **0.27 us**
+  - p99.9: **7.96 us**
+  - CPU avg: **43.1%**
+  - RSS max: **27,208 KB**
+- Wisp:
+  - pub: **30,768 msg/s**
+  - sub-agg: **3,089,843 msg/s**
+  - avg: **9.25 us**
+  - p99: **0.37 us**
+  - p99.9: **12.59 us**
+  - CPU avg: **62.8%**
+  - RSS max: **26,604 KB**
+
+Delta (Wisp vs NATS, median):
+- pub msgs/sec: **-1.81%**
+- sub-agg msgs/sec: **-0.83%**
+- avg latency: **+3.01%**
+- p99 latency: **+37.04%**
+- p99.9 latency: **+58.17%**
+- CPU avg: **+45.66%**
+- RSS max: **-2.22%**
+
+Interpretation:
+- In this stricter 5-run wide fan-out comparison, Wisp is very close but currently trails NATS on throughput and tail latency, while using more CPU.
+- Memory footprint is slightly lower on Wisp.
+
+---
+
+## 2026-03-02 — Writer tuning sweep (flush threshold / idle / slice cap)
+
+Change:
+- Made writer batching knobs runtime-configurable via env vars:
+  - `WISP_WRITEV_FLUSH_THRESHOLD_BYTES` (default `65536`)
+  - `WISP_WRITEV_FLUSH_IDLE_US` (default `1000`)
+  - `WISP_WRITEV_MAX_IO_SLICES` (default `1024`)
+
+Sweep workload:
+- `1 pub / 100 sub / 1 topic / 30000 msgs / 128B`
+- 3 runs per config (median shown)
+
+Results:
+- `64k / 1000us / 1024` (baseline):
+  - pub **31,479**, sub-agg **3,168,371**, avg **9.04us**, p99 **0.30us**, p99.9 **7.35us**
+- `32k / 500us / 512`:
+  - pub **29,865**, sub-agg **2,997,521**, avg **9.12us**, p99 **0.43us**, p99.9 **14.17us**
+- `32k / 200us / 512`:
+  - pub **19,839**, sub-agg **1,957,748**, avg **10.13us**, p99 **0.29us**, p99.9 **8.54us**
+- `16k / 200us / 256`:
+  - pub **21,778**, sub-agg **2,137,040**, avg **9.73us**, p99 **0.41us**, p99.9 **11.81us**
+- `16k / 500us / 256`:
+  - pub **18,788**, sub-agg **1,876,259**, avg **9.75us**, p99 **0.31us**, p99.9 **8.18us**
+- `64k / 200us / 1024`:
+  - pub **9,327**, sub-agg **935,399**, avg **21.31us**, p99 **0.72us**, p99.9 **13.66us**
+
+Observation:
+- Baseline remained best for throughput in this sweep.
+- More aggressive timer settings (especially `200us`) caused substantial regressions.
+
+Focused follow-up (5 runs):
+- Baseline `64k/1000us/1024` median:
+  - pub **33,056**, sub-agg **3,381,282**, avg **8.80us**, p99 **0.68us**, p99.9 **16.52us**
+- `64k/1000us/512` median:
+  - pub **32,667**, sub-agg **3,267,172**, avg **8.54us**, p99 **0.39us**, p99.9 **11.32us**
+
+Tradeoff:
+- `64k/1000us/512` improves tail latency noticeably vs baseline (`p99.9: 16.52 -> 11.32us`) with moderate throughput cost (`sub-agg: 3.381M -> 3.267M`, ~3.4%).
+
+---
+
+## 2026-03-02 — Eliminate per-dispatch header allocations (structured SendMessage parts)
+
+Optimization scope:
+- Replace per-subscriber prebuilt `header: Bytes` in `ServerCommand::SendMessage` with structured parts:
+  - `header_prefix` (`MSG <subject> <sid> `, cached in dispatch)
+  - optional `reply_to`
+  - `payload_len`
+  - `payload`
+- Writer now formats payload size into a stack buffer (`[u8; 20]`) once per queued message and emits all parts via batched `write_vectored`.
+- Removes `format_msg_header_no_reply/with_reply` allocations from hot pub dispatch path.
+
+### Wide fan-out benchmark (5 runs)
+Workload:
+- `1 pub / 100 sub / 1 topic / 30000 msgs / 128B`
+
+Wisp after change (runs):
+- 75,476 / 5,983,971 / 3.80us / 0.27us / 9.51us
+- 76,529 / 6,240,793 / 3.96us / 0.33us / 10.62us
+- 75,424 / 5,827,403 / 3.71us / 0.35us / 10.08us
+- 75,589 / 5,561,797 / 3.55us / 0.23us / 7.67us
+- 72,468 / 6,213,326 / 4.00us / 0.40us / 11.24us
+
+Medians (Wisp after):
+- pub: **75,476 msg/s**
+- sub-agg: **5,983,971 msg/s**
+- avg: **3.80us**
+- p99: **0.33us**
+- p99.9: **10.08us**
+
+Compared to prior Wisp median in wide fan-out section (`30,768 / 3,089,843 / 9.25us / 0.37us / 12.59us`):
+- pub: **+145.3%**
+- sub-agg: **+93.7%**
+- avg latency: **-58.9%**
+- p99 latency: **-10.8%**
+- p99.9 latency: **-19.9%**
+
+NATS comparison (same workload, 5 runs, medians):
+- NATS medians: **30,553 msg/s**, **3,041,035 msg/s**, avg **8.43us**, p99 **0.37us**, p99.9 **11.80us**
+- Delta (Wisp vs NATS):
+  - pub: **+147.0%**
+  - sub-agg: **+96.8%**
+  - avg latency: **-54.9%**
+  - p99 latency: **-10.8%**
+  - p99.9 latency: **-14.6%**
+
+### Non-fanout many-subject benchmark (5 runs)
+Workload:
+- `1 pub / 1 sub / 5000 topics / 2,000,000 msgs / 64B`
+
+Wisp after medians:
+- pub: **1,655,234 msg/s**
+- sub: **1,656,961 msg/s**
+- avg: **0.36us**
+- p99: **0.25us**
+- p99.9: **7.24us**
+
+Compared to prior Wisp median (`1,710,309 / 1,719,351`):
+- pub: **-3.2%**
+- sub: **-3.6%**
+
+Interpretation:
+- This change is a major win for wide fan-out throughput and latency.
+- It slightly regresses the 1-subscriber many-subject case.

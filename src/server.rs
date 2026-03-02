@@ -22,6 +22,22 @@ fn generate_client_id() -> u64 {
     NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
 #[derive(Debug)]
 enum PendingWrite {
     Send {
@@ -29,27 +45,55 @@ enum PendingWrite {
         offset: usize,
     },
     SendMessage {
-        header: Bytes,
-        header_offset: usize,
+        header_prefix: Bytes,
+        header_prefix_offset: usize,
+        reply_to: Option<Bytes>,
+        reply_to_offset: usize,
+        reply_space_offset: usize,
+        size_bytes: [u8; 20],
+        size_len: usize,
+        size_offset: usize,
+        header_crlf_offset: usize,
         payload: Bytes,
         payload_offset: usize,
-        crlf_offset: usize,
+        trailer_crlf_offset: usize,
     },
 }
 
 impl PendingWrite {
     const CRLF: &[u8] = b"\r\n";
+    const SPACE: &[u8] = b" ";
 
     fn from_command(cmd: ServerCommand) -> Option<Self> {
         match cmd {
             ServerCommand::Send(bytes) => Some(PendingWrite::Send { bytes, offset: 0 }),
-            ServerCommand::SendMessage { header, payload } => Some(PendingWrite::SendMessage {
-                header,
-                header_offset: 0,
+            ServerCommand::SendMessage {
+                header_prefix,
+                reply_to,
+                payload_len,
                 payload,
-                payload_offset: 0,
-                crlf_offset: 0,
-            }),
+            } => {
+                let mut size_bytes = [0u8; 20];
+                let mut size_buf = itoa::Buffer::new();
+                let size_str = size_buf.format(payload_len);
+                let size_len = size_str.len();
+                size_bytes[..size_len].copy_from_slice(size_str.as_bytes());
+
+                Some(PendingWrite::SendMessage {
+                    header_prefix,
+                    header_prefix_offset: 0,
+                    reply_to,
+                    reply_to_offset: 0,
+                    reply_space_offset: 0,
+                    size_bytes,
+                    size_len,
+                    size_offset: 0,
+                    header_crlf_offset: 0,
+                    payload,
+                    payload_offset: 0,
+                    trailer_crlf_offset: 0,
+                })
+            }
             ServerCommand::Shutdown => None,
         }
     }
@@ -58,15 +102,36 @@ impl PendingWrite {
         match self {
             PendingWrite::Send { bytes, offset } => bytes.len() - *offset,
             PendingWrite::SendMessage {
-                header,
-                header_offset,
+                header_prefix,
+                header_prefix_offset,
+                reply_to,
+                reply_to_offset,
+                reply_space_offset,
+                size_len,
+                size_offset,
+                header_crlf_offset,
                 payload,
                 payload_offset,
-                crlf_offset,
+                trailer_crlf_offset,
+                ..
             } => {
-                (header.len() - *header_offset)
+                let reply_to_remaining = reply_to
+                    .as_ref()
+                    .map(|value| value.len().saturating_sub(*reply_to_offset))
+                    .unwrap_or(0);
+                let reply_space_remaining = if reply_to.is_some() {
+                    Self::SPACE.len().saturating_sub(*reply_space_offset)
+                } else {
+                    0
+                };
+
+                (header_prefix.len() - *header_prefix_offset)
+                    + reply_to_remaining
+                    + reply_space_remaining
+                    + (size_len - *size_offset)
+                    + (Self::CRLF.len() - *header_crlf_offset)
                     + (payload.len() - *payload_offset)
-                    + (Self::CRLF.len() - *crlf_offset)
+                    + (Self::CRLF.len() - *trailer_crlf_offset)
             }
         }
     }
@@ -87,20 +152,43 @@ impl PendingWrite {
                 }
             }
             PendingWrite::SendMessage {
-                header,
-                header_offset,
+                header_prefix,
+                header_prefix_offset,
+                reply_to,
+                reply_to_offset,
+                reply_space_offset,
+                size_bytes,
+                size_len,
+                size_offset,
+                header_crlf_offset,
                 payload,
                 payload_offset,
-                crlf_offset,
+                trailer_crlf_offset,
             } => {
-                if *header_offset < header.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&header[*header_offset..]));
+                if *header_prefix_offset < header_prefix.len() && out.len() < max_slices {
+                    out.push(IoSlice::new(&header_prefix[*header_prefix_offset..]));
+                }
+
+                if let Some(reply_to) = reply_to {
+                    if *reply_to_offset < reply_to.len() && out.len() < max_slices {
+                        out.push(IoSlice::new(&reply_to[*reply_to_offset..]));
+                    }
+                    if *reply_space_offset < Self::SPACE.len() && out.len() < max_slices {
+                        out.push(IoSlice::new(&Self::SPACE[*reply_space_offset..]));
+                    }
+                }
+
+                if *size_offset < *size_len && out.len() < max_slices {
+                    out.push(IoSlice::new(&size_bytes[*size_offset..*size_len]));
+                }
+                if *header_crlf_offset < Self::CRLF.len() && out.len() < max_slices {
+                    out.push(IoSlice::new(&Self::CRLF[*header_crlf_offset..]));
                 }
                 if *payload_offset < payload.len() && out.len() < max_slices {
                     out.push(IoSlice::new(&payload[*payload_offset..]));
                 }
-                if *crlf_offset < Self::CRLF.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&Self::CRLF[*crlf_offset..]));
+                if *trailer_crlf_offset < Self::CRLF.len() && out.len() < max_slices {
+                    out.push(IoSlice::new(&Self::CRLF[*trailer_crlf_offset..]));
                 }
             }
         }
@@ -120,26 +208,55 @@ impl PendingWrite {
                 bytes -= step;
             }
             PendingWrite::SendMessage {
-                header,
-                header_offset,
+                header_prefix,
+                header_prefix_offset,
+                reply_to,
+                reply_to_offset,
+                reply_space_offset,
+                size_len,
+                size_offset,
+                header_crlf_offset,
                 payload,
                 payload_offset,
-                crlf_offset,
+                trailer_crlf_offset,
+                ..
             } => {
-                let header_remaining = header.len() - *header_offset;
-                let header_step = header_remaining.min(bytes);
-                *header_offset += header_step;
-                bytes -= header_step;
+                let prefix_remaining = header_prefix.len() - *header_prefix_offset;
+                let prefix_step = prefix_remaining.min(bytes);
+                *header_prefix_offset += prefix_step;
+                bytes -= prefix_step;
+
+                if let Some(reply_to) = reply_to {
+                    let reply_remaining = reply_to.len() - *reply_to_offset;
+                    let reply_step = reply_remaining.min(bytes);
+                    *reply_to_offset += reply_step;
+                    bytes -= reply_step;
+
+                    let reply_space_remaining = Self::SPACE.len() - *reply_space_offset;
+                    let reply_space_step = reply_space_remaining.min(bytes);
+                    *reply_space_offset += reply_space_step;
+                    bytes -= reply_space_step;
+                }
+
+                let size_remaining = *size_len - *size_offset;
+                let size_step = size_remaining.min(bytes);
+                *size_offset += size_step;
+                bytes -= size_step;
+
+                let header_crlf_remaining = Self::CRLF.len() - *header_crlf_offset;
+                let header_crlf_step = header_crlf_remaining.min(bytes);
+                *header_crlf_offset += header_crlf_step;
+                bytes -= header_crlf_step;
 
                 let payload_remaining = payload.len() - *payload_offset;
                 let payload_step = payload_remaining.min(bytes);
                 *payload_offset += payload_step;
                 bytes -= payload_step;
 
-                let crlf_remaining = Self::CRLF.len() - *crlf_offset;
-                let crlf_step = crlf_remaining.min(bytes);
-                *crlf_offset += crlf_step;
-                bytes -= crlf_step;
+                let trailer_crlf_remaining = Self::CRLF.len() - *trailer_crlf_offset;
+                let trailer_crlf_step = trailer_crlf_remaining.min(bytes);
+                *trailer_crlf_offset += trailer_crlf_step;
+                bytes -= trailer_crlf_step;
             }
         }
 
@@ -186,9 +303,10 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                             mpsc::channel::<ServerCommand>(CHANNEL_BUF_SIZE);
 
                         tokio::spawn(async move {
-                            const FLUSH_THRESHOLD_BYTES: usize = 64 * 1024;
-                            const FLUSH_IDLE_MS: u64 = 1;
-                            const MAX_IO_SLICES: usize = 1024;
+                            let flush_threshold_bytes =
+                                env_usize("WISP_WRITEV_FLUSH_THRESHOLD_BYTES", 64 * 1024);
+                            let flush_idle_us = env_u64("WISP_WRITEV_FLUSH_IDLE_US", 1_000);
+                            let max_io_slices = env_usize("WISP_WRITEV_MAX_IO_SLICES", 1024);
 
                             let mut writer = write_stream;
                             let mut pending_writes: VecDeque<PendingWrite> = VecDeque::new();
@@ -217,16 +335,17 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 writer: &mut tokio::net::tcp::OwnedWriteHalf,
                                 queue: &mut VecDeque<PendingWrite>,
                                 pending_bytes: &mut usize,
+                                max_io_slices: usize,
                             ) -> io::Result<()> {
                                 if *pending_bytes == 0 {
                                     return Ok(());
                                 }
 
                                 while !queue.is_empty() {
-                                    let mut slices = Vec::with_capacity(MAX_IO_SLICES);
+                                    let mut slices = Vec::with_capacity(max_io_slices);
                                     for pending in queue.iter() {
-                                        pending.append_io_slices(&mut slices, MAX_IO_SLICES);
-                                        if slices.len() >= MAX_IO_SLICES {
+                                        pending.append_io_slices(&mut slices, max_io_slices);
+                                        if slices.len() >= max_io_slices {
                                             break;
                                         }
                                     }
@@ -277,7 +396,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                         tokio::select! {
                                             received = write_task_rx.recv() => received,
                                             _ = tokio::time::sleep_until(deadline) => {
-                                                if let Err(e) = flush_pending(&mut writer, &mut pending_writes, &mut pending_bytes).await {
+                                                if let Err(e) = flush_pending(&mut writer, &mut pending_writes, &mut pending_bytes, max_io_slices).await {
                                                     error!("[Client {} Writer] Error flushing on timer: {}", client_id, e);
                                                     break;
                                                 }
@@ -294,6 +413,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                         &mut writer,
                                         &mut pending_writes,
                                         &mut pending_bytes,
+                                        max_io_slices,
                                     )
                                     .await
                                     {
@@ -319,11 +439,12 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                     }
                                 }
 
-                                if pending_bytes >= FLUSH_THRESHOLD_BYTES || should_shutdown {
+                                if pending_bytes >= flush_threshold_bytes || should_shutdown {
                                     if let Err(e) = flush_pending(
                                         &mut writer,
                                         &mut pending_writes,
                                         &mut pending_bytes,
+                                        max_io_slices,
                                     )
                                     .await
                                     {
@@ -336,7 +457,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                     flush_deadline = None;
                                 } else if pending_bytes > 0 {
                                     flush_deadline =
-                                        Some(Instant::now() + Duration::from_millis(FLUSH_IDLE_MS));
+                                        Some(Instant::now() + Duration::from_micros(flush_idle_us));
                                 }
 
                                 if should_shutdown {
