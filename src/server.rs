@@ -336,22 +336,44 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
 
                     match parse_result {
                         Ok((command_bytes, args_bytes)) => {
-                            // Convert args to string for existing handlers
-                            let args_str = std::str::from_utf8(args_bytes).map_err(|_| {
-                                ServerError::InvalidProtocol(
-                                    "Invalid UTF-8 in command arguments".to_string(),
-                                )
-                            })?;
-
-                            debug!(
-                                "[Client {}] Parsed Command: '{}', Args Str: '{}'",
-                                self.id,
-                                String::from_utf8_lossy(command_bytes),
-                                args_str
-                            );
-
                             let handler_result =
-                                self.handle_command_bytes(command_bytes, args_str).await;
+                                if protocol::command_matches(command_bytes, b"CONNECT") {
+                                    let args_str = std::str::from_utf8(args_bytes).map_err(|_| {
+                                        ServerError::InvalidProtocol(
+                                            "Invalid UTF-8 in command arguments".to_string(),
+                                        )
+                                    });
+
+                                    match args_str {
+                                        Ok(args_str) => {
+                                            debug!(
+                                                "[Client {}] Parsed Command: '{}', Args Str: '{}'",
+                                                self.id,
+                                                String::from_utf8_lossy(command_bytes),
+                                                args_str
+                                            );
+                                            self.handle_command_bytes(command_bytes, args_str).await
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                } else {
+                                    if !args_bytes.is_ascii() {
+                                        Err(ServerError::InvalidProtocol(
+                                            "Non-ASCII command arguments".to_string(),
+                                        ))
+                                    } else {
+                                        // SAFETY: Non-CONNECT command arguments are validated as ASCII above.
+                                        let args_str =
+                                            unsafe { std::str::from_utf8_unchecked(args_bytes) };
+                                        debug!(
+                                            "[Client {}] Parsed Command: '{}', Args Str: '{}'",
+                                            self.id,
+                                            String::from_utf8_lossy(command_bytes),
+                                            args_str
+                                        );
+                                        self.handle_command_bytes(command_bytes, args_str).await
+                                    }
+                                };
 
                             if let Err(e) = handler_result {
                                 let command_str = String::from_utf8_lossy(command_bytes);

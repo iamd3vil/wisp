@@ -272,3 +272,55 @@ Median delta:
 Interpretation:
 - Bounded cache works as intended and prevents unbounded growth.
 - Very small caps materially hurt throughput in high-cardinality workloads due to frequent rebuilds.
+
+---
+
+## 2026-03-02 — ASCII-only fast path + merge dedup for dispatch client IDs
+
+Optimization scope:
+- **4.2** Avoid generic UTF-8 validation on hot commands:
+  - Keep strict UTF-8 parsing for `CONNECT` args.
+  - For non-CONNECT commands, validate `is_ascii()` and use `from_utf8_unchecked`.
+- **4.3 (partial)** Replace `sort_unstable + dedup` on merged subscriber IDs with a direct merge of sorted literal/wildcard subscriber lists.
+
+### Benchmark: wide fan-out (3 runs)
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=50 TOPICS=1 MSGS=30000 SIZE=128 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (publisher / subscriber-agg msg/s):
+- 33,990 / 1,709,682
+- 34,822 / 1,688,467
+- 35,379 / 1,732,444
+
+After (publisher / subscriber-agg msg/s):
+- 34,106 / 1,742,168
+- 35,146 / 1,697,615
+- 34,411 / 1,668,736
+
+Median delta:
+- Publisher: **34,822 -> 34,411** (**-1.2%**)
+- Subscriber aggregated: **1,709,682 -> 1,697,615** (**-0.7%**)
+
+### Benchmark: non-fanout many-subjects
+Command:
+- `SERVER_URL=nats://127.0.0.1:4222 START_SERVER=1 PUBLISHERS=1 SUBSCRIBERS=1 TOPICS=5000 MSGS=2000000 SIZE=64 BUILD_RELEASE=0 ./benchmark.sh`
+
+Before (3 runs, publisher / subscriber msg/s):
+- 1,115,626 / 1,126,571
+- 1,060,609 / 1,061,934
+- 1,179,066 / 1,179,044
+
+After (5 runs, publisher / subscriber msg/s):
+- 941,259 / 942,625
+- 1,117,479 / 1,128,954
+- 987,608 / 993,815
+- 1,126,634 / 1,129,361
+- 1,143,858 / 1,146,101
+
+Median delta:
+- Publisher: **1,115,626 -> 1,117,479** (**+0.2%**)
+- Subscriber: **1,126,571 -> 1,128,954** (**+0.2%**)
+
+### Notes
+- Net throughput impact is near-neutral in these runs (tiny deltas, high variance).
+- Protocol behavior check: non-ASCII non-CONNECT args now return `-ERR` consistently.

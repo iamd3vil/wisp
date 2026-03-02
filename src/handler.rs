@@ -320,31 +320,55 @@ impl ClientHandler {
 
     async fn build_dispatches(&self, subject: &str) -> Vec<SubscriberDispatch> {
         let prefix = Self::subject_prefix(subject);
-        let mut client_ids: Vec<u64> = Vec::new();
 
-        if !Self::is_wildcard_prefix(prefix) {
+        let targeted_clients: Vec<u64> = if !Self::is_wildcard_prefix(prefix) {
             let idx = Self::shard_index(prefix);
             let targeted = {
                 let shard = self.subscriptions[idx].read().await;
                 shard.get_subscribers(subject)
             };
-            client_ids.extend(targeted.into_iter());
-        }
+            targeted.into_iter().collect()
+        } else {
+            Vec::new()
+        };
 
-        if self.wildcard_has_subscribers.load(Ordering::Relaxed) {
-            let wildcard_clients = {
+        let wildcard_clients: Vec<u64> = if self.wildcard_has_subscribers.load(Ordering::Relaxed) {
+            let wildcard = {
                 let shard = self.wildcard_subscriptions.read().await;
                 shard.get_subscribers(subject)
             };
-            client_ids.extend(wildcard_clients.into_iter());
-        }
+            wildcard.into_iter().collect()
+        } else {
+            Vec::new()
+        };
 
-        if client_ids.is_empty() {
+        if targeted_clients.is_empty() && wildcard_clients.is_empty() {
             return Vec::new();
         }
 
-        client_ids.sort_unstable();
-        client_ids.dedup();
+        let mut client_ids = Vec::with_capacity(targeted_clients.len() + wildcard_clients.len());
+        let mut targeted_iter = targeted_clients.into_iter().peekable();
+        let mut wildcard_iter = wildcard_clients.into_iter().peekable();
+
+        while let (Some(&targeted_id), Some(&wildcard_id)) =
+            (targeted_iter.peek(), wildcard_iter.peek())
+        {
+            if targeted_id < wildcard_id {
+                client_ids.push(targeted_iter.next().expect("peek guaranteed next"));
+                continue;
+            }
+
+            if wildcard_id < targeted_id {
+                client_ids.push(wildcard_iter.next().expect("peek guaranteed next"));
+                continue;
+            }
+
+            client_ids.push(targeted_iter.next().expect("peek guaranteed next"));
+            let _ = wildcard_iter.next();
+        }
+
+        client_ids.extend(targeted_iter);
+        client_ids.extend(wildcard_iter);
 
         let mut dispatches = Vec::with_capacity(client_ids.len());
 
