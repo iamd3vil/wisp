@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::str::Split;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -76,6 +78,141 @@ pub trait NatsServerHandler: Send + Sync + 'static {
     async fn handle_disconnect(&self, client_id: u64);
 }
 
+#[derive(Debug, Default)]
+struct WildcardSidNode {
+    sid: Option<Arc<str>>,
+    multi_level_sid: Option<Arc<str>>,
+    star_child: Option<Box<WildcardSidNode>>,
+    token_children: HashMap<String, WildcardSidNode>,
+}
+
+impl WildcardSidNode {
+    fn is_empty(&self) -> bool {
+        self.sid.is_none()
+            && self.multi_level_sid.is_none()
+            && self.star_child.is_none()
+            && self.token_children.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+struct WildcardSidIndex {
+    root: WildcardSidNode,
+}
+
+impl WildcardSidIndex {
+    fn insert(&mut self, pattern: &str, sid: &str) {
+        let sid = Arc::<str>::from(sid);
+        Self::insert_recursive(&mut self.root, pattern.split('.'), &sid);
+    }
+
+    fn insert_recursive(node: &mut WildcardSidNode, mut tokens: Split<'_, char>, sid: &Arc<str>) {
+        let Some(token) = tokens.next() else {
+            node.sid = Some(Arc::clone(sid));
+            return;
+        };
+
+        if token == ">" {
+            node.multi_level_sid = Some(Arc::clone(sid));
+            return;
+        }
+
+        if token == "*" {
+            let child = node
+                .star_child
+                .get_or_insert_with(|| Box::new(WildcardSidNode::default()));
+            Self::insert_recursive(child.as_mut(), tokens, sid);
+            return;
+        }
+
+        let child = node.token_children.entry(token.to_string()).or_default();
+        Self::insert_recursive(child, tokens, sid);
+    }
+
+    fn remove(&mut self, pattern: &str, sid: &str) {
+        let _ = Self::remove_recursive(&mut self.root, pattern.split('.'), sid);
+    }
+
+    fn remove_recursive(
+        node: &mut WildcardSidNode,
+        mut tokens: Split<'_, char>,
+        sid: &str,
+    ) -> bool {
+        let Some(token) = tokens.next() else {
+            if node.sid.as_deref() == Some(sid) {
+                node.sid = None;
+            }
+            return node.is_empty();
+        };
+
+        if token == ">" {
+            if node.multi_level_sid.as_deref() == Some(sid) {
+                node.multi_level_sid = None;
+            }
+            return node.is_empty();
+        }
+
+        if token == "*" {
+            let remove_star_child = if let Some(star_child) = node.star_child.as_mut() {
+                Self::remove_recursive(star_child.as_mut(), tokens, sid)
+            } else {
+                false
+            };
+
+            if remove_star_child {
+                node.star_child = None;
+            }
+
+            return node.is_empty();
+        }
+
+        let remove_token_child = if let Some(token_child) = node.token_children.get_mut(token) {
+            Self::remove_recursive(token_child, tokens, sid)
+        } else {
+            false
+        };
+
+        if remove_token_child {
+            node.token_children.remove(token);
+        }
+
+        node.is_empty()
+    }
+
+    fn resolve(&self, subject: &str) -> Option<Arc<str>> {
+        Self::resolve_recursive(&self.root, subject.split('.'))
+    }
+
+    fn resolve_recursive(node: &WildcardSidNode, mut tokens: Split<'_, char>) -> Option<Arc<str>> {
+        let Some(token) = tokens.next() else {
+            if let Some(sid) = node.sid.as_ref() {
+                return Some(Arc::clone(sid));
+            }
+            return node.multi_level_sid.as_ref().map(Arc::clone);
+        };
+
+        let remaining = tokens;
+
+        if let Some(token_child) = node.token_children.get(token) {
+            if let Some(sid) = Self::resolve_recursive(token_child, remaining.clone()) {
+                return Some(sid);
+            }
+        }
+
+        if let Some(star_child) = node.star_child.as_ref() {
+            if let Some(sid) = Self::resolve_recursive(star_child.as_ref(), remaining.clone()) {
+                return Some(sid);
+            }
+        }
+
+        node.multi_level_sid.as_ref().map(Arc::clone)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.root.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SubscriberDispatch {
     client_id: u64,
@@ -99,8 +236,11 @@ pub struct ClientHandler {
     wildcard_subscriptions: Arc<RwLock<submap::SubMap<u64>>>,
     wildcard_has_subscribers: Arc<AtomicBool>,
 
-    // Map from client_id to subject -> SID for proper message formatting
+    // Map from client_id to subject -> SID for exact SID lookup and UNSUB cleanup.
     sid_map: Arc<DashMap<u64, DashMap<String, String>>>,
+
+    // Per-client reverse wildcard index to avoid linear wildcard SID scans.
+    wildcard_sid_index: Arc<DashMap<u64, WildcardSidIndex>>,
 
     // Cache resolved subscriber lists per publish subject
     dispatch_cache: Arc<DashMap<String, Arc<CachedDispatch>>>,
@@ -131,6 +271,7 @@ impl ClientHandler {
             wildcard_subscriptions: Arc::new(RwLock::new(Self::create_submap())),
             wildcard_has_subscribers: Arc::new(AtomicBool::new(false)),
             sid_map: Arc::new(DashMap::new()),
+            wildcard_sid_index: Arc::new(DashMap::new()),
             dispatch_cache: Arc::new(DashMap::new()),
             dispatch_cache_capacity,
             dispatch_cache_tick: Arc::new(AtomicU64::new(0)),
@@ -237,6 +378,27 @@ impl ClientHandler {
         None
     }
 
+    fn upsert_wildcard_sid_index(&self, client_id: u64, subject: &str, sid: &str) {
+        let mut index = self
+            .wildcard_sid_index
+            .entry(client_id)
+            .or_insert_with(WildcardSidIndex::default);
+        index.insert(subject, sid);
+    }
+
+    fn remove_wildcard_sid_index(&self, client_id: u64, subject: &str, sid: &str) {
+        let mut should_remove_client_entry = false;
+
+        if let Some(mut index) = self.wildcard_sid_index.get_mut(&client_id) {
+            index.remove(subject, sid);
+            should_remove_client_entry = index.is_empty();
+        }
+
+        if should_remove_client_entry {
+            self.wildcard_sid_index.remove(&client_id);
+        }
+    }
+
     async fn remove_subscription_from_shard(&self, client_id: u64, subject: &str) {
         let prefix = Self::subject_prefix(subject);
 
@@ -274,19 +436,14 @@ impl ClientHandler {
     }
 
     fn resolve_sid_for_subject(&self, client_id: u64, subject: &str) -> Option<Arc<str>> {
-        let subject_map = self.sid_map.get(&client_id)?;
-
-        if let Some(sid_ref) = subject_map.get(subject) {
-            return Some(Arc::<str>::from(sid_ref.value().as_str()));
-        }
-
-        for entry in subject_map.value().iter() {
-            if Self::subject_matches(entry.key(), subject) {
-                return Some(Arc::<str>::from(entry.value().as_str()));
+        if let Some(subject_map) = self.sid_map.get(&client_id) {
+            if let Some(sid_ref) = subject_map.get(subject) {
+                return Some(Arc::<str>::from(sid_ref.value().as_str()));
             }
         }
 
-        None
+        let index = self.wildcard_sid_index.get(&client_id)?;
+        index.resolve(subject)
     }
 
     fn subject_matches(pattern: &str, subject: &str) -> bool {
@@ -506,6 +663,10 @@ impl NatsServerHandler for ClientHandler {
         let subject_map = self.sid_map.entry(client_id).or_insert_with(DashMap::new);
         subject_map.insert(subject.to_string(), sid.to_string());
 
+        if protocol::subject_contains_wildcard(subject) {
+            self.upsert_wildcard_sid_index(client_id, subject, sid);
+        }
+
         self.invalidate_dispatch_cache_for_subscription(subject);
 
         Ok(())
@@ -540,6 +701,10 @@ impl NatsServerHandler for ClientHandler {
         self.remove_subscription_from_shard(client_id, &subject)
             .await;
 
+        if protocol::subject_contains_wildcard(&subject) {
+            self.remove_wildcard_sid_index(client_id, &subject, sid);
+        }
+
         let mut remove_sid_entry = false;
         if let Some(subject_map) = self.sid_map.get(&client_id) {
             subject_map.remove(&subject);
@@ -548,6 +713,7 @@ impl NatsServerHandler for ClientHandler {
 
         if remove_sid_entry {
             self.sid_map.remove(&client_id);
+            self.wildcard_sid_index.remove(&client_id);
             self.unregister_client_from_all_shards(client_id).await;
         }
 
@@ -558,10 +724,9 @@ impl NatsServerHandler for ClientHandler {
 
     async fn handle_ping(
         &self,
-        client_id: u64,
+        _client_id: u64,
         _sender: &mpsc::Sender<ServerCommand>,
     ) -> ServerResult<()> {
-        println!("[Client {}] PING", client_id);
         Ok(())
     }
 
@@ -579,10 +744,52 @@ impl NatsServerHandler for ClientHandler {
 
         self.clients.remove(&client_id);
         self.sid_map.remove(&client_id);
+        self.wildcard_sid_index.remove(&client_id);
         self.unregister_client_from_all_shards(client_id).await;
 
         println!("[Client {}] Disconnected", client_id);
 
         self.invalidate_dispatch_cache_for_subscriptions(&subjects);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WildcardSidIndex;
+
+    #[test]
+    fn wildcard_sid_index_matches_specific_before_multi_level() {
+        let mut index = WildcardSidIndex::default();
+        index.insert("orders.>", "sid_multi");
+        index.insert("orders.*", "sid_single");
+
+        let sid = index.resolve("orders.NSE").expect("sid should resolve");
+        assert_eq!(sid.as_ref(), "sid_single");
+    }
+
+    #[test]
+    fn wildcard_sid_index_matches_multi_level_fallback() {
+        let mut index = WildcardSidIndex::default();
+        index.insert("orders.>", "sid_multi");
+
+        let sid = index
+            .resolve("orders.NSE.RELIANCE")
+            .expect("sid should resolve");
+        assert_eq!(sid.as_ref(), "sid_multi");
+    }
+
+    #[test]
+    fn wildcard_sid_index_remove_prunes_paths() {
+        let mut index = WildcardSidIndex::default();
+        index.insert("orders.*", "sid_single");
+        index.insert("orders.>", "sid_multi");
+
+        index.remove("orders.*", "sid_single");
+        let sid = index.resolve("orders.NSE").expect("sid should resolve");
+        assert_eq!(sid.as_ref(), "sid_multi");
+
+        index.remove("orders.>", "sid_multi");
+        assert!(index.resolve("orders.NSE").is_none());
+        assert!(index.is_empty());
     }
 }

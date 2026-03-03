@@ -1,0 +1,165 @@
+{
+  "workload": {
+    "PUBLISHERS": "1",
+    "SUBSCRIBERS": "100",
+    "TOPICS": "1",
+    "MSGS": "30000",
+    "SIZE": "128",
+    "BUILD_RELEASE": "0",
+    "START_SERVER": "0"
+  },
+  "nats_runs": [
+    {
+      "pub_mps": 31950.0,
+      "sub_agg_mps": 3185057.0,
+      "avg_us": 8.8,
+      "p99_us": 0.23,
+      "p999_us": 8.85,
+      "pub_line": "NATS Core NATS publisher stats: 31,950 msgs/sec ~ 3.9 MiB/sec ~ min: 0.06us ~ avg: 8.80us ~ max: 259,146.91us ~ P50: 0.12us ~ P90: 0.14us ~ P99: 0.23us ~ P99.9: 8.85us",
+      "sub_line": "subscriber aggregated stats: 3,185,057 msgs/sec ~ 389 MiB/sec",
+      "cpu_avg_pct": 36.54,
+      "cpu_med_pct": 6.6,
+      "rss_max_kb": 26632
+    },
+    {
+      "pub_mps": 31541.0,
+      "sub_agg_mps": 3135388.0,
+      "avg_us": 8.58,
+      "p99_us": 0.28,
+      "p999_us": 7.32,
+      "pub_line": "NATS Core NATS publisher stats: 31,541 msgs/sec ~ 3.9 MiB/sec ~ min: 0.06us ~ avg: 8.58us ~ max: 249,621.68us ~ P50: 0.16us ~ P90: 0.21us ~ P99: 0.28us ~ P99.9: 7.32us",
+      "sub_line": "subscriber aggregated stats: 3,135,388 msgs/sec ~ 383 MiB/sec",
+      "cpu_avg_pct": 41.013333333333335,
+      "cpu_med_pct": 16.2,
+      "rss_max_kb": 28204
+    },
+    {
+      "pub_mps": 31336.0,
+      "sub_agg_mps": 3115821.0,
+      "avg_us": 8.98,
+      "p99_us": 0.2,
+      "p999_us": 7.96,
+      "pub_line": "NATS Core NATS publisher stats: 31,336 msgs/sec ~ 3.8 MiB/sec ~ min: 0.07us ~ avg: 8.98us ~ max: 262,933.02us ~ P50: 0.13us ~ P90: 0.15us ~ P99: 0.2us ~ P99.9: 7.96us",
+      "sub_line": "subscriber aggregated stats: 3,115,821 msgs/sec ~ 380 MiB/sec",
+      "cpu_avg_pct": 45.019999999999996,
+      "cpu_med_pct": 17.9,
+      "rss_max_kb": 27304
+    },
+    {
+      "pub_mps": 30354.0,
+      "sub_agg_mps": 3027699.0,
+      "avg_us": 9.35,
+      "p99_us": 0.27,
+      "p999_us": 10.68,
+      "pub_line": "NATS Core NATS publisher stats: 30,354 msgs/sec ~ 3.7 MiB/sec ~ min: 0.06us ~ avg: 9.35us ~ max: 272,224.97us ~ P50: 0.13us ~ P90: 0.15us ~ P99: 0.27us ~ P99.9: 10.68us",
+      "sub_line": "subscriber aggregated stats: 3,027,699 msgs/sec ~ 370 MiB/sec",
+      "cpu_avg_pct": 43.1,
+      "cpu_med_pct": 8.3,
+      "rss_max_kb": 27136
+    },
+    {
+      "pub_mps": 29656.0,
+      "sub_agg_mps": 2953378.0,
+      "avg_us": 9.83,
+      "p99_us": 3.69,
+      "p999_us": 6.49,
+      "pub_line": "NATS Core NATS publisher stats: 29,656 msgs/sec ~ 3.6 MiB/sec ~ min: 0.06us ~ avg: 9.83us ~ max: 284,263.40us ~ P50: 0.13us ~ P90: 0.16us ~ P99: 3.69us ~ P99.9: 6.49us",
+      "sub_line": "subscriber aggregated stats: 2,953,378 msgs/sec ~ 360 MiB/sec",
+      "cpu_avg_pct": 45.80625,
+      "cpu_med_pct": 11.05,
+      "rss_max_kb": 27208
+    }
+  ],
+  "wisp_runs": [
+    {
+      "pub_mps": 31046.0,
+      "sub_agg_mps": 3142669.0,
+      "avg_us": 9.63,
+      "p99_us": 0.37,
+      "p999_us": 12.59,
+      "pub_line": "NATS Core NATS publisher stats: 31,046 msgs/sec ~ 3.8 MiB/sec ~ min: 0.06us ~ avg: 9.63us ~ max: 282,172.12us ~ P50: 0.15us ~ P90: 0.22us ~ P99: 0.37us ~ P99.9: 12.59us",
+      "sub_line": "subscriber aggregated stats: 3,142,669 msgs/sec ~ 384 MiB/sec",
+      "cpu_avg_pct": 64.73125,
+      "cpu_med_pct": 15.7,
+      "rss_max_kb": 26456
+    },
+    {
+      "pub_mps": 31217.0,
+      "sub_agg_mps": 3170163.0,
+      "avg_us": 9.23,
+      "p99_us": 0.61,
+      "p999_us": 14.96,
+      "pub_line": "NATS Core NATS publisher stats: 31,217 msgs/sec ~ 3.8 MiB/sec ~ min: 0.08us ~ avg: 9.23us ~ max: 267,865.81us ~ P50: 0.19us ~ P90: 0.34us ~ P99: 0.61us ~ P99.9: 14.96us",
+      "sub_line": "subscriber aggregated stats: 3,170,163 msgs/sec ~ 387 MiB/sec",
+      "cpu_avg_pct": 62.78125,
+      "cpu_med_pct": 15.450000000000001,
+      "rss_max_kb": 26676
+    },
+    {
+      "pub_mps": 30144.0,
+      "sub_agg_mps": 3060033.0,
+      "avg_us": 8.65,
+      "p99_us": 0.71,
+      "p999_us": 19.18,
+      "pub_line": "NATS Core NATS publisher stats: 30,144 msgs/sec ~ 3.7 MiB/sec ~ min: 0.07us ~ avg: 8.65us ~ max: 249,351.03us ~ P50: 0.20us ~ P90: 0.39us ~ P99: 0.71us ~ P99.9: 19.18us",
+      "sub_line": "subscriber aggregated stats: 3,060,033 msgs/sec ~ 374 MiB/sec",
+      "cpu_avg_pct": 62.35625,
+      "cpu_med_pct": 11.899999999999999,
+      "rss_max_kb": 26604
+    },
+    {
+      "pub_mps": 30498.0,
+      "sub_agg_mps": 3085589.0,
+      "avg_us": 9.25,
+      "p99_us": 0.27,
+      "p999_us": 6.76,
+      "pub_line": "NATS Core NATS publisher stats: 30,498 msgs/sec ~ 3.7 MiB/sec ~ min: 0.06us ~ avg: 9.25us ~ max: 272,805.36us ~ P50: 0.11us ~ P90: 0.16us ~ P99: 0.27us ~ P99.9: 6.76us",
+      "sub_line": "subscriber aggregated stats: 3,085,589 msgs/sec ~ 377 MiB/sec",
+      "cpu_avg_pct": 68.44375,
+      "cpu_med_pct": 16.05,
+      "rss_max_kb": 24692
+    },
+    {
+      "pub_mps": 30768.0,
+      "sub_agg_mps": 3089843.0,
+      "avg_us": 9.29,
+      "p99_us": 0.21,
+      "p999_us": 6.16,
+      "pub_line": "NATS Core NATS publisher stats: 30,768 msgs/sec ~ 3.8 MiB/sec ~ min: 0.06us ~ avg: 9.29us ~ max: 274,290.09us ~ P50: 0.12us ~ P90: 0.15us ~ P99: 0.21us ~ P99.9: 6.16us",
+      "sub_line": "subscriber aggregated stats: 3,089,843 msgs/sec ~ 377 MiB/sec",
+      "cpu_avg_pct": 55.63125,
+      "cpu_med_pct": 12.8,
+      "rss_max_kb": 30056
+    }
+  ],
+  "nats_median": {
+    "pub_mps": 31336.0,
+    "sub_agg_mps": 3115821.0,
+    "avg_us": 8.98,
+    "p99_us": 0.27,
+    "p999_us": 7.96,
+    "cpu_avg_pct": 43.1,
+    "cpu_med_pct": 11.05,
+    "rss_max_kb": 27208
+  },
+  "wisp_median": {
+    "pub_mps": 30768.0,
+    "sub_agg_mps": 3089843.0,
+    "avg_us": 9.25,
+    "p99_us": 0.37,
+    "p999_us": 12.59,
+    "cpu_avg_pct": 62.78125,
+    "cpu_med_pct": 15.450000000000001,
+    "rss_max_kb": 26604
+  },
+  "delta_pct_wisp_vs_nats": {
+    "pub_mps": -1.8126116926219042,
+    "sub_agg_mps": -0.833744942344249,
+    "avg_us": 3.0066815144766097,
+    "p99_us": 37.037037037037024,
+    "p999_us": 58.165829145728644,
+    "cpu_avg_pct": 45.664153132250576,
+    "cpu_med_pct": 39.81900452488688,
+    "rss_max_kb": -2.219935313143193
+  }
+}

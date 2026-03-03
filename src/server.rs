@@ -66,7 +66,9 @@ impl PendingWrite {
 
     fn from_command(cmd: ServerCommand) -> Option<Self> {
         match cmd {
-            ServerCommand::Send(bytes) => Some(PendingWrite::Send { bytes, offset: 0 }),
+            ServerCommand::Send(bytes) | ServerCommand::SendImmediate(bytes) => {
+                Some(PendingWrite::Send { bytes, offset: 0 })
+            }
             ServerCommand::SendMessage {
                 header_prefix,
                 reply_to,
@@ -317,18 +319,21 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 queue: &mut VecDeque<PendingWrite>,
                                 pending_bytes: &mut usize,
                                 cmd: ServerCommand,
-                            ) -> bool {
-                                if matches!(cmd, ServerCommand::Shutdown) {
-                                    return true;
+                            ) -> (bool, bool) {
+                                if matches!(&cmd, ServerCommand::Shutdown) {
+                                    return (true, false);
                                 }
 
+                                let should_flush_now =
+                                    matches!(&cmd, ServerCommand::SendImmediate(_));
+
                                 let Some(write) = PendingWrite::from_command(cmd) else {
-                                    return false;
+                                    return (false, should_flush_now);
                                 };
 
                                 *pending_bytes += write.remaining_len();
                                 queue.push_back(write);
-                                false
+                                (false, should_flush_now)
                             }
 
                             async fn flush_pending(
@@ -425,21 +430,26 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                     break;
                                 };
 
-                                let mut should_shutdown =
+                                let (mut should_shutdown, mut should_flush_now) =
                                     enqueue_command(&mut pending_writes, &mut pending_bytes, cmd);
 
                                 while let Ok(additional_cmd) = write_task_rx.try_recv() {
-                                    if enqueue_command(
+                                    let (shutdown, flush_now) = enqueue_command(
                                         &mut pending_writes,
                                         &mut pending_bytes,
                                         additional_cmd,
-                                    ) {
+                                    );
+                                    should_flush_now = should_flush_now || flush_now;
+                                    if shutdown {
                                         should_shutdown = true;
                                         break;
                                     }
                                 }
 
-                                if pending_bytes >= flush_threshold_bytes || should_shutdown {
+                                if pending_bytes >= flush_threshold_bytes
+                                    || should_shutdown
+                                    || should_flush_now
+                                {
                                     if let Err(e) = flush_pending(
                                         &mut writer,
                                         &mut pending_writes,
@@ -646,7 +656,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                 let err_msg = protocol::format_err(&e.to_string());
                                 if self
                                     .sender_to_writer
-                                    .send(ServerCommand::Send(err_msg))
+                                    .send(ServerCommand::SendImmediate(err_msg))
                                     .await
                                     .is_err()
                                 {
@@ -667,7 +677,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                             let err_msg = protocol::format_err("Unknown Protocol Operation");
                             if self
                                 .sender_to_writer
-                                .send(ServerCommand::Send(err_msg))
+                                .send(ServerCommand::SendImmediate(err_msg))
                                 .await
                                 .is_err()
                             {
@@ -751,7 +761,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                 // Queue PONG via sender
                 if self
                     .sender_to_writer
-                    .send(ServerCommand::Send(pong_bytes))
+                    .send(ServerCommand::SendImmediate(pong_bytes))
                     .await
                     .is_err()
                 {

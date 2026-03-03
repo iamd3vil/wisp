@@ -15,21 +15,20 @@ The goal from here is to push past NATS on the workloads that matter most (wide 
 
 ## 2. Completed Work
 
-These optimizations are already landed in the codebase across the last two major commits:
+These optimizations are already landed in the codebase (see `BENCHMARK_JOURNAL.md` for measurements):
 
-- **Sharded subscription registry.** Split subscriptions across 64 `RwLock<SubMap>` shards keyed by the first subject token via ahash, plus a dedicated wildcard bucket with an `AtomicBool` fast-path to skip it entirely when empty. Eliminates global lock contention so publishes to `orders.AAPL` don't contend with publishes to `trades.MSFT`.
-
-- **Dispatch caching.** Introduced `dispatch_cache: DashMap<String, Arc<Vec<SubscriberDispatch>>>` that pre-resolves the subscriber list (sender handle + SID) per publish subject. Subsequent publishes to the same subject skip shard lookups, wildcard merging, and SID resolution entirely.
-
-- **Zero-copy payload fan-out.** Added the `ServerCommand::SendMessage { header, payload }` variant where `payload` is a `Bytes` refcount. Publishing to N subscribers clones the refcount N times (8 bytes each) instead of copying the payload N times. Added `format_msg_header()` to format only the MSG control line, keeping the payload separate.
-
-- **Zero-allocation byte-slice parsing.** `parse_command_line_bytes` works on `&[u8]` with no intermediate `String` allocations. `command_matches` does case-insensitive ASCII comparison directly on byte slices.
-
-- **Writer task batching.** The writer task uses `recv().await` for the first message, then drains pending messages via `try_recv()` before flushing. This coalesces multiple messages into a single flush when they arrive in bursts.
-
-- **Literal-only PUB subjects.** Wildcard tokens (`*`, `>`) are rejected in PUB commands, matching upstream NATS semantics.
-
-- **SID storage as `Arc<str>`.** `SubscriberDispatch` stores SIDs as `Arc<str>` for cheap cloning.
+- **Sharded subscription registry.** Split subscriptions across 64 `RwLock<SubMap>` shards keyed by the first subject token via ahash, plus a dedicated wildcard bucket with an `AtomicBool` fast-path.
+- **Dispatch caching.** Per-subject dispatch resolution cache with bounded size + LRU-style eviction metadata.
+- **Surgical cache invalidation.** Targeted invalidation on SUB/UNSUB/disconnect instead of global cache clears.
+- **UNSUB cleanup.** Real shard + `sid_map` removal on UNSUB, with targeted invalidation.
+- **Header-prefix caching + no per-dispatch header allocation path.** `MSG <subject> <sid> ` cached per dispatch, and writer now builds message parts via vectored I/O without per-subscriber header buffer allocation.
+- **Batched vectored writer queue.** Custom pending-write queue with `write_vectored`, partial-write tracking, and tunable flush thresholds/timers.
+- **Reader payload buffer reuse.** Reused `BytesMut` for PUB payload reads.
+- **Borrowed parse args.** `parse_pub_args` / `parse_sub_args` / `parse_unsub_args` return borrows to avoid hot-path `String` allocations.
+- **ASCII fast-path parsing.** Non-CONNECT commands use ASCII validation + unchecked UTF-8 conversion.
+- **Client-ID merge dedup path.** Replaced sort+dedup path with merge of literal/wildcard subscriber lists.
+- **Literal-only PUB subjects.** Wildcard tokens (`*`, `>`) are rejected in PUB commands.
+- **SID storage as `Arc<str>`.** Cheap cloning for dispatch-side SID handling.
 
 ---
 
@@ -37,7 +36,7 @@ These optimizations are already landed in the codebase across the last two major
 
 These are concrete, scoped changes that can be implemented and benchmarked independently. Each should land with a flamegraph or allocation profile comparing before/after.
 
-### 3.1 Surgical Dispatch Cache Invalidation
+### 3.1 Surgical Dispatch Cache Invalidation ✅ Done
 
 **Problem.** `invalidate_dispatch_cache()` calls `self.dispatch_cache.clear()`, nuking every cached dispatch list whenever any subscription change occurs — a single SUB, UNSUB, or client disconnect wipes the entire cache. With 10,000 active subjects and one new subscription, all 10,000 dispatch lists get rebuilt on the next publish.
 
@@ -58,7 +57,7 @@ This preserves the cache for the vast majority of subjects and turns a thunderin
 
 **Validation.** Add a cache hit/miss counter (`AtomicU64`) and compare hit ratios before/after under a `nats bench` workload with 1000+ subjects and occasional subscribe/unsubscribe churn.
 
-### 3.2 Pre-Cached MSG Header Prefix in SubscriberDispatch
+### 3.2 Pre-Cached MSG Header Prefix in SubscriberDispatch ✅ Done (and extended)
 
 **Problem.** In `handle_pub` (handler.rs:288-294), `protocol::format_msg_header()` is called once per subscriber per published message. Each call allocates a new `BytesMut`, writes `MSG <subject> <sid> [reply-to] <size>\r\n`, and freezes it into `Bytes`. For a subject with 1000 subscribers, that's 1000 heap allocations per publish.
 
@@ -72,7 +71,7 @@ The header/payload split is already done (from the `SendMessage` work), but the 
 
 **Expected impact.** Eliminates the hottest per-message allocation in wide fan-out scenarios. At 3.87M msg/s aggregate, even small per-message savings compound significantly.
 
-### 3.3 UNSUB Cleanup
+### 3.3 UNSUB Cleanup ✅ Done (except max_msgs auto-expiry)
 
 **Problem.** `handle_unsub` currently logs the event and calls `invalidate_dispatch_cache()` but does not actually remove the subscription from the shard maps or `sid_map`. This means:
 
@@ -88,7 +87,7 @@ The header/payload split is already done (from the `SendMessage` work), but the 
 4. Invalidate only the affected subject(s) in the dispatch cache (per 3.1).
 5. If `max_msgs` is `Some(n)`, store a decrement counter and trigger cleanup automatically when it hits zero.
 
-### 3.4 Borrowed Subjects Through the Parse → Handle Path
+### 3.4 Borrowed Subjects Through the Parse → Handle Path ✅ Done
 
 **Problem.** `parse_pub_args` returns `(String, Option<String>, usize)`, allocating a new heap `String` for the subject (and optionally reply-to) on every single PUB command. These strings are derived from `args_str`, which is a `&str` borrow from the line buffer that lives long enough for the entire `handle_command_bytes` call.
 
@@ -112,7 +111,7 @@ The handler trait already accepts `subject: &str`, so the only changes are in th
 
 **Impact.** Eliminates 1-2 String allocations per PUB command. At 3.87M msg/s, that's ~4-8M fewer allocations/sec.
 
-### 3.5 Reader Payload Buffer Reuse
+### 3.5 Reader Payload Buffer Reuse ✅ Done
 
 **Problem.** Every PUB command allocates a fresh `BytesMut`:
 
@@ -133,7 +132,7 @@ struct ClientConnectionLogic<H: NatsServerHandler> {
 
 On each PUB, `clear()` + `reserve()` reuses the underlying allocation if capacity is sufficient (which it almost always will be since payload sizes are bounded by `MAX_PAYLOAD` and most messages are far smaller than the high-water mark). After `split_to(size).freeze()`, the `BytesMut` retains its allocation for the next message.
 
-### 3.6 Writer Flush Coalescing
+### 3.6 Writer Flush Coalescing ✅ Done (superseded by batched writev queue)
 
 **Problem.** The writer's `try_recv()` drain loop works well under burst load, but under moderate steady-state load, messages often arrive one at a time: `recv().await` → write one message → `try_recv()` finds nothing → `flush()` → syscall. This means one `write(2)` + `flush()` per message.
 
@@ -165,7 +164,7 @@ Also consider increasing `BufWriter` capacity from 8KB to 64KB to reduce the fre
 
 **Validation.** Measure syscall rate using `strace -c` before/after. Target: 5-10x reduction in `write(2)` calls under sustained load.
 
-### 3.7 Bounded Dispatch Cache with LRU Eviction
+### 3.7 Bounded Dispatch Cache with LRU Eviction ✅ Done
 
 **Problem.** The `dispatch_cache` grows without bound. A long-lived server with high subject churn (e.g., subjects like `quotes.<symbol>.<timestamp>`) will accumulate stale entries that consume memory and slow down DashMap operations.
 
@@ -203,11 +202,11 @@ for entry in subject_map.value().iter() {
 
 For a client with 500 wildcard subscriptions, this is O(500) per message per subscriber on cache miss.
 
-**Mitigating factor.** Since `build_dispatches` resolves the SID at cache-build time and the result is cached in `SubscriberDispatch.sid`, this linear scan only runs on cache miss. With surgical invalidation (3.1), cache misses become rare.
+**Mitigating factor.** `build_dispatches` resolves SID/header-prefix data at cache-build time, so this linear scan only runs on cache miss. With surgical invalidation (3.1), cache misses become rare.
 
 **Proposed fix (for cache-cold and wildcard-heavy workloads).** Build a trie or radix tree per client indexing wildcard patterns by token structure. At dispatch time, walk the trie with concrete subject tokens, matching `*` and `>` nodes. This turns the lookup from O(N) pattern scans to O(depth) where depth is the number of tokens in the subject (typically 2-4).
 
-### 4.2 Avoid UTF-8 Validation on the Hot Path
+### 4.2 Avoid UTF-8 Validation on the Hot Path ✅ Done
 
 **Problem.** Every command's arguments are validated as UTF-8 in `server.rs:253`:
 
@@ -219,7 +218,7 @@ NATS subjects are ASCII-only. The UTF-8 validation checks for multi-byte sequenc
 
 **Proposed fix.** For PUB and SUB commands, use `unsafe { std::str::from_utf8_unchecked(args_bytes) }` on the hot path. Safety argument: NATS wire protocol allows only ASCII in subjects and SIDs, and the parser validates structure. Alternatively, use `args_bytes.is_ascii()` as a cheaper check. Keep safe `from_utf8` for CONNECT (which carries JSON with potentially non-ASCII fields).
 
-### 4.3 Client ID Deduplication Without Sorting
+### 4.3 Client ID Deduplication Without Sorting ✅ Done (merge-path variant)
 
 **Problem.** `build_dispatches` collects client IDs from shard + wildcard lookups, then deduplicates via:
 
@@ -233,7 +232,7 @@ client_ids.dedup();
 - **Bitset:** Client IDs are sequential from an `AtomicU64`. Use a fixed-size bitset (`[u64; 16]` = 1024 clients) for O(1) insert and O(n) iteration.
 - **Pre-deduplication:** If `SubMap` guarantees no duplicates within a shard, duplicates only arise between the literal and wildcard shards. A two-pointer merge of two sorted lists is O(n + m) without the full sort.
 
-### 4.4 Write Vectored I/O (writev)
+### 4.4 Write Vectored I/O (writev) ✅ Done (custom batched writer)
 
 **Problem.** The writer does three sequential `write_all` calls for `SendMessage`:
 
@@ -353,18 +352,18 @@ Every optimization PR should include:
 
 Ordered by expected impact-to-effort ratio, given the current 3.87M msg/s baseline:
 
-| Priority | Optimization | Section | Effort | Expected Impact |
-|---|---|---|---|---|
-| P0 | Surgical cache invalidation | 3.1 | Medium | High — eliminates thundering rebuild under churn |
-| P0 | UNSUB cleanup | 3.3 | Medium | Correctness — stale dispatch prevention |
-| P0 | Borrowed subjects in parse | 3.4 | Low | Medium — ~4-8M fewer allocs/sec |
-| P1 | Pre-cached MSG header prefix | 3.2 | Medium | High — eliminates per-subscriber alloc in fan-out |
-| P1 | Reader payload buffer reuse | 3.5 | Low | Medium — removes per-PUB allocation |
-| P1 | Writer flush coalescing | 3.6 | Medium | Medium-High — reduces syscall rate |
-| P2 | Bounded dispatch cache / LRU | 3.7 | Medium | Memory safety under churn |
-| P2 | Dispatch vector pooling | 3.8 | Low | Low-Medium — reduces alloc churn |
-| P2 | Write vectored I/O | 4.4 | Medium | Medium — further syscall reduction |
-| P3 | Wildcard SID reverse index | 4.1 | High | High for wildcard-heavy workloads |
-| P3 | Skip UTF-8 validation | 4.2 | Low | Low — small constant factor |
-| P3 | Client ID dedup without sort | 4.3 | Low | Low — small constant factor |
-| P3 | Per-subject publish counters | 4.5 | Low | Observability, enables smarter eviction |
+| Priority | Optimization | Section | Effort | Expected Impact | Status |
+|---|---|---|---|---|---|
+| P0 | Surgical cache invalidation | 3.1 | Medium | High — eliminates thundering rebuild under churn | ✅ Done |
+| P0 | UNSUB cleanup | 3.3 | Medium | Correctness — stale dispatch prevention | ⚠️ Mostly done (`max_msgs` auto-expiry pending) |
+| P0 | Borrowed subjects in parse | 3.4 | Low | Medium — ~4-8M fewer allocs/sec | ✅ Done |
+| P1 | Pre-cached MSG header prefix | 3.2 | Medium | High — eliminates per-subscriber alloc in fan-out | ✅ Done (and extended to no per-dispatch header alloc path) |
+| P1 | Reader payload buffer reuse | 3.5 | Low | Medium — removes per-PUB allocation | ✅ Done |
+| P1 | Writer flush coalescing | 3.6 | Medium | Medium-High — reduces syscall rate | ✅ Done (evolved into custom batched writer) |
+| P2 | Bounded dispatch cache / LRU | 3.7 | Medium | Memory safety under churn | ✅ Done |
+| P2 | Dispatch vector pooling | 3.8 | Low | Low-Medium — reduces alloc churn | ⏳ Not done |
+| P2 | Write vectored I/O | 4.4 | Medium | Medium — further syscall reduction | ✅ Done (custom batched writev queue) |
+| P3 | Wildcard SID reverse index | 4.1 | High | High for wildcard-heavy workloads | ⏳ Not done |
+| P3 | Skip UTF-8 validation | 4.2 | Low | Low — small constant factor | ✅ Done |
+| P3 | Client ID dedup without sort | 4.3 | Low | Low — small constant factor | ✅ Done (merge-path variant) |
+| P3 | Per-subject publish counters | 4.5 | Low | Observability, enables smarter eviction | ⏳ Not done |

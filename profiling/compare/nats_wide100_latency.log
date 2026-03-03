@@ -1,0 +1,342 @@
+[0;34m========================================[0m
+[0;34m  Wisp Pub/Sub Benchmark[0m
+[0;34m========================================[0m
+
+Parameters:
+  Publishers: 1
+  Subscribers: 100
+  Topics: 1
+  Messages: 30000
+  Payload: 128
+  Server: nats://127.0.0.1:4223
+  Subject: bench.wisp
+  Start server: 0
+
+[0;32m=== Using Existing Server ===[0m
+
+[0;32m=== Starting Subscribers ===[0m
+[0;32m=== Running Publisher Benchmark ===[0m
+--- Publisher ---
+22:42:16 Starting Core NATS publisher benchmark [clients=1, msg-size=128 B, msgs=30,000, multi-subject=false, multi-subject-max=100,000, multi-subject-randomize=false, sleep=0s, subject=bench.wisp]
+22:42:16 [1] Starting Core NATS publisher, publishing 30,000 messages
+
+NATS Core NATS publisher stats: 33,307 msgs/sec ~ 4.1 MiB/sec ~ min: 0.06us ~ avg: 7.60us ~ max: 221,936.19us ~ P50: 0.13us ~ P90: 0.18us ~ P99: 0.36us ~ P99.9: 9.27us
+
+--- Subscriber ---
+22:42:15 Starting Core NATS subscriber benchmark [clients=100, msg-size=128 B, msgs=30,000, multi-subject=false, subject=bench.wisp]
+22:42:15 [1] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [2] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [3] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [4] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [5] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [6] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [7] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [8] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [9] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [10] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [11] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [12] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [13] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [14] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [15] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [16] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [17] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [18] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [19] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [20] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [21] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [22] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [23] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [24] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [25] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [26] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [27] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [28] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [29] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [30] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [31] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [32] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [33] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [34] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [35] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [36] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [37] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [38] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [39] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [40] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [41] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [42] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [43] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [44] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [45] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [46] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [47] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [48] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [49] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [50] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [51] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [52] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [53] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [54] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [55] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [56] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [57] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [58] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [59] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [60] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [61] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [62] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [63] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [64] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [65] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [66] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [67] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [68] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [69] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [70] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [71] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [72] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [73] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [74] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [75] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [76] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [77] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [78] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [79] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [80] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [81] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [82] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [83] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [84] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [85] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [86] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [87] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [88] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [89] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [90] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [91] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [92] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [93] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [94] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [95] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [96] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [97] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [98] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [99] Starting Core NATS subscriber, expecting 30,000 messages
+22:42:15 [100] Starting Core NATS subscriber, expecting 30,000 messages
+
+  [1] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [2] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [3] 33,351 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [4] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [5] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [6] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [7] 33,351 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [8] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [9] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [10] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [11] 33,362 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [12] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [13] 33,358 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [14] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [15] 33,356 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [16] 33,353 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [17] 33,327 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [18] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [19] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [20] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [21] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [22] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [23] 33,360 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [24] 33,326 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [25] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [26] 33,338 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [27] 33,331 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [28] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [29] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [30] 33,338 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [31] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [32] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [33] 33,325 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [34] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [35] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [36] 33,324 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [37] 33,336 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [38] 33,333 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [39] 33,322 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [40] 33,324 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [41] 33,330 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [42] 33,330 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [43] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [44] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [45] 33,332 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [46] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [47] 33,322 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [48] 33,319 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [49] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [50] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [51] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [52] 33,313 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [53] 33,329 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [54] 33,331 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [55] 33,300 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [56] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [57] 33,319 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [58] 33,318 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [59] 33,301 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [60] 33,312 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [61] 33,310 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [62] 33,299 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [63] 33,311 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [64] 33,309 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [65] 33,300 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [66] 33,304 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [67] 33,301 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [68] 33,280 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [69] 33,272 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [70] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [71] 33,283 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [72] 33,296 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [73] 33,292 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [74] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [75] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [76] 33,275 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [77] 33,289 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [78] 33,267 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [79] 33,260 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [80] 33,278 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [81] 33,287 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [82] 33,275 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [83] 33,259 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [84] 33,266 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [85] 33,258 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [86] 33,239 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [87] 33,257 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [88] 33,252 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [89] 33,249 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [90] 33,244 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [91] 33,242 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [92] 33,235 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [93] 33,234 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [94] 33,229 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [95] 33,230 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [96] 33,228 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [97] 33,240 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [98] 33,229 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [99] 33,232 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [100] 33,246 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+
+ NATS Core NATS subscriber aggregated stats: 3,321,031 msgs/sec ~ 405 MiB/sec
+ message rates min 33,228 | avg 33,308 | max 33,362 | stddev 38 msgs
+
+[0;34m========================================[0m
+[0;34m  Results Summary[0m
+[0;34m========================================[0m
+Publisher:
+NATS Core NATS publisher stats: 33,307 msgs/sec ~ 4.1 MiB/sec ~ min: 0.06us ~ avg: 7.60us ~ max: 221,936.19us ~ P50: 0.13us ~ P90: 0.18us ~ P99: 0.36us ~ P99.9: 9.27us
+
+Subscriber:
+  [1] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [2] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [3] 33,351 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [4] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [5] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [6] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [7] 33,351 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [8] 33,352 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [9] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [10] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [11] 33,362 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [12] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [13] 33,358 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [14] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [15] 33,356 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [16] 33,353 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [17] 33,327 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [18] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [19] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [20] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [21] 33,346 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [22] 33,344 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [23] 33,360 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [24] 33,326 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [25] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [26] 33,338 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [27] 33,331 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [28] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [29] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [30] 33,338 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [31] 33,337 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [32] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [33] 33,325 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [34] 33,348 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [35] 33,335 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [36] 33,324 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [37] 33,336 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [38] 33,333 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [39] 33,322 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [40] 33,324 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [41] 33,330 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [42] 33,330 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [43] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [44] 33,339 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [45] 33,332 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [46] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [47] 33,322 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [48] 33,319 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [49] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [50] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [51] 33,321 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [52] 33,313 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [53] 33,329 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [54] 33,331 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [55] 33,300 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [56] 33,317 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [57] 33,319 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [58] 33,318 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [59] 33,301 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [60] 33,312 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [61] 33,310 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [62] 33,299 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [63] 33,311 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [64] 33,309 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [65] 33,300 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [66] 33,304 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [67] 33,301 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [68] 33,280 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [69] 33,272 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [70] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [71] 33,283 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [72] 33,296 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [73] 33,292 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [74] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [75] 33,290 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [76] 33,275 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [77] 33,289 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [78] 33,267 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [79] 33,260 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [80] 33,278 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [81] 33,287 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [82] 33,275 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [83] 33,259 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [84] 33,266 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [85] 33,258 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [86] 33,239 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [87] 33,257 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [88] 33,252 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [89] 33,249 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [90] 33,244 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [91] 33,242 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [92] 33,235 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [93] 33,234 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [94] 33,229 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [95] 33,230 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [96] 33,228 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [97] 33,240 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [98] 33,229 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [99] 33,232 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+  [100] 33,246 msgs/sec ~ 4.1 MiB/sec (30,000 msgs)
+ NATS Core NATS subscriber aggregated stats: 3,321,031 msgs/sec ~ 405 MiB/sec
+ message rates min 33,228 | avg 33,308 | max 33,362 | stddev 38 msgs
+
+[0;32mBenchmark complete[0m

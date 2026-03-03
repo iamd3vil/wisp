@@ -6,6 +6,11 @@ use bytes::Bytes; // Make sure Bytes is imported
 pub enum ServerCommand {
     /// Send these specific bytes to the client.
     Send(Bytes),
+    /// Send these bytes and force an immediate writer flush.
+    ///
+    /// Used for latency-sensitive control-plane responses (e.g. PONG, -ERR)
+    /// to avoid idle-timer flush delays.
+    SendImmediate(Bytes),
     /// Send a message using pre-split protocol parts.
     ///
     /// `header_prefix` contains: `MSG <subject> <sid> `

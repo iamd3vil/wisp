@@ -541,3 +541,28 @@ Compared to prior Wisp median (`1,710,309 / 1,719,351`):
 Interpretation:
 - This change is a major win for wide fan-out throughput and latency.
 - It slightly regresses the 1-subscriber many-subject case.
+
+### Wide fan-out CPU / memory snapshot (post-change)
+
+Workload:
+- `1 pub / 100 sub / 1 topic / 30000 msgs / 128B`
+
+Method:
+- 3 runs each for NATS and Wisp.
+- Sample server process via `ps -p <pid> -o %cpu,rss` every 100ms while benchmark runs.
+- Report median of per-run aggregates.
+
+Results:
+- NATS median:
+  - CPU avg: **40.6%**
+  - CPU median sample: **11.4%**
+  - RSS max: **28,192 KB**
+- Wisp median:
+  - CPU avg: **25.9%**
+  - CPU median sample: **6.2%**
+  - RSS max: **50,064 KB**
+
+Delta (Wisp vs NATS):
+- CPU avg: **-36.3%** (better)
+- CPU median sample: **-45.6%** (better)
+- RSS max: **+77.6%** (worse)
