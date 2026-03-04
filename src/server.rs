@@ -201,7 +201,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                         let mut connection_logic = ClientConnectionLogic {
                             id: client_id,
                             reader,
-                            payload_buffer: BytesMut::with_capacity(1024),
+
                             handler: handler_clone,
                             server_info: server_info_clone,
                             connect_options: None,
@@ -257,7 +257,6 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
 struct ClientConnectionLogic<H: NatsServerHandler> {
     id: u64,
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    payload_buffer: BytesMut,
     handler: Arc<H>,
     server_info: Arc<ServerInfo>,
     connect_options: Option<ConnectOptions>,
@@ -354,23 +353,38 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
     }
 
     /// Read payload + CRLF, validate, return payload as Bytes.
+    ///
+    /// Allocates a fresh BytesMut per PUB, reads into it, and freezes directly.
+    /// `freeze()` on a non-shared BytesMut is free (type conversion, no Arc).
+    ///
+    /// Why not reuse `self.payload_buffer`? Because `split_to().freeze()` promotes
+    /// the BytesMut to shared state (Arc malloc), detaching the allocation. The next
+    /// PUB's `reserve()` must then malloc a fresh buffer anyway — making "reuse"
+    /// illusory. A fresh BytesMut per PUB costs the same one malloc but avoids the
+    /// extra Arc promotion malloc from `split_to`.
+    ///
+    /// Uses `unsafe set_len` instead of `resize(n, 0)` to skip memset zero-fill,
+    /// since `read_exact` overwrites every byte before we inspect the buffer.
     #[inline]
     async fn read_pub_payload(&mut self, size: usize) -> ServerResult<Bytes> {
         let payload_with_crlf = size + 2;
-        self.payload_buffer.clear();
-        self.payload_buffer.reserve(payload_with_crlf);
-        self.payload_buffer.resize(payload_with_crlf, 0);
-        self.reader.read_exact(&mut self.payload_buffer).await?;
+        let mut buf = BytesMut::with_capacity(payload_with_crlf);
+        // SAFETY: `with_capacity` guarantees capacity >= payload_with_crlf.
+        // `read_exact` will fill exactly payload_with_crlf bytes before returning Ok.
+        unsafe {
+            buf.set_len(payload_with_crlf);
+        }
+        self.reader.read_exact(&mut buf).await?;
 
-        if &self.payload_buffer[size..] != b"\r\n" {
+        if &buf[size..] != b"\r\n" {
             return Err(ServerError::InvalidProtocol(
                 "PUB payload not followed by CRLF".to_string(),
             ));
         }
 
-        let payload = self.payload_buffer.split_to(size).freeze();
-        self.payload_buffer.clear();
-        Ok(payload)
+        buf.truncate(size);
+        // freeze() on a non-shared BytesMut is a type conversion — no allocation.
+        Ok(buf.freeze())
     }
 
     /// Processes incoming commands from the client's reader half.
