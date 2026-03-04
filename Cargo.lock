@@ -664,6 +664,7 @@ dependencies = [
  "dashmap",
  "itoa",
  "lazy_static",
+ "memchr",
  "serde",
  "serde_json",
  "submap",

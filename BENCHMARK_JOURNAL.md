@@ -1,5 +1,87 @@
 # Wisp Benchmark Journal
 
+## 2026-03-04 — Fast-path PUB parser + contiguous write buffer
+
+Optimization scope:
+1. **Fast-path PUB parser**: Inline single-pass PUB command parser using `memchr` that
+   bypasses the generic `parse_command_line_bytes` → `command_matches` → `parse_pub_args`
+   pipeline. Reduces parsing from ~43 samples (29.5% of reader CPU) to a single pass.
+2. **Contiguous write buffer**: Replaced scatter-gather `writev` with 5-7 IoSlices per
+   message with a flat `Vec<u8>` write buffer + `write_all`. Eliminates `PendingWrite` enum
+   (~164 bytes with 13 fields), `VecDeque`, IoSlice construction, and complex partial-write
+   `advance()` tracking. Message parts are copied into the contiguous buffer before flushing.
+
+### A/B Comparison: Wisp vs NATS Server 2.12.4 (5 runs each, pub+sub stats)
+
+**64B 1:1 (1M msgs, 1 pub / 1 sub)**
+
+| Server | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
+|---|---:|---:|---:|---:|---:|---:|
+| NATS pub | 3,829,777 | 3,841,294 | 3,898,927 | 3,797,849 | 3,808,867 | 3,841,294 |
+| NATS sub | 3,836,928 | 3,850,552 | 3,906,715 | 3,810,678 | 3,820,161 | 3,836,928 |
+| Wisp pub | 5,601,704 | 5,353,526 | 5,378,574 | 5,191,046 | 5,267,052 | **5,353,526** |
+| Wisp sub | 5,306,523 | 5,129,978 | 5,147,232 | 5,027,930 | 5,097,051 | **5,129,978** |
+
+**64B 1:1 summary**: Wisp **+33.7%** faster (sub: 5,130K vs 3,837K msgs/sec)
+
+**1KB 1:1 (500K msgs, 1 pub / 1 sub)**
+
+| Server | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median |
+|---|---:|---:|---:|---:|---:|---:|
+| NATS pub | 2,212,832 | 2,159,082 | 2,234,427 | 2,136,553 | 2,127,492 | 2,159,082 |
+| NATS sub | 2,093,640 | 2,167,032 | 2,102,645 | 2,029,797 | 2,040,599 | 2,093,640 |
+| Wisp pub | 1,920,656 | 2,126,660 | 2,111,077 | 1,970,469 | 2,113,884 | **2,111,077** |
+| Wisp sub | 1,924,054 | 2,131,406 | 2,115,544 | 1,975,241 | 2,086,332 | **2,086,332** |
+
+**1KB 1:1 summary**: Wisp **-0.3%** (sub: 2,086K vs 2,094K msgs/sec) — essentially parity
+
+**8KB 1:1 (200K msgs, 1 pub / 1 sub)**
+
+| Server | Run 1 | Run 2 | Run 3 | Median |
+|---|---:|---:|---:|---:|
+| NATS | 428,175 | 429,588 | 427,364 | **428,175** |
+| Wisp | 389,689 | 398,806 | 396,941 | **396,941** |
+
+**8KB 1:1 summary**: Wisp **-7.3%** behind (improved from -23.5% before flat buffer)
+
+**Many subjects (2M msgs, 5000 topics, 64B, 1 pub / 1 sub)**
+
+| Server | Run 1 | Run 2 | Run 3 | Median |
+|---|---:|---:|---:|---:|
+| NATS | 1,480,531 | 1,472,883 | 1,483,177 | **1,480,531** |
+| Wisp | 3,808,491 | 3,842,221 | 3,827,596 | **3,827,596** |
+
+**Many subjects summary**: Wisp **+158.6%** faster
+
+**Fan-out 100 subscribers (30K msgs, 128B, 1 pub / 100 sub)**
+
+| Server | Run 1 pub | Run 2 pub | Run 3 pub |
+|---|---:|---:|---:|
+| NATS | 30,465 | 34,016 | 24,235 |
+| Wisp | 118,921 | 82,972 | 99,580 |
+
+**Fan-out summary**: Wisp **~3.3× faster** — no regression from write buffer change
+
+### Progression vs previous optimization round (2026-03-04 async_trait removal)
+
+| Workload | Before (writev) | After (flat buf) | Improvement |
+|---|---:|---:|---:|
+| 64B 1:1 sub | ~3,748K | 5,130K | **+36.9%** |
+| 1KB 1:1 sub | ~1,896K | 2,086K | **+10.0%** |
+| 8KB 1:1 | ~334K | 397K | **+18.9%** |
+| Many subjects | ~3,794K | 3,828K | +0.9% |
+
+### Notes
+- The contiguous write buffer is the dominant optimization. It eliminated ~230 lines of
+  complex scatter-gather code (PendingWrite enum, IoSlice building, advance tracking).
+- For small payloads (64B), the flat buffer dramatically reduces kernel writev overhead
+  since each message previously generated 5 IoSlices (header, size, CRLF, payload, CRLF).
+- For large payloads (8KB), the memcpy cost of copying payload into the flat buffer is
+  measurable but still outperformed by the simpler write path.
+- Fast-path PUB parser using memchr skips the generic command dispatch for the hot path.
+
+---
+
 ## 2026-03-02 — Surgical dispatch cache invalidation + UNSUB cleanup
 
 Optimization scope:

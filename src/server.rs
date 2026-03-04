@@ -4,8 +4,6 @@ use crate::error::{ServerError, ServerResult};
 use crate::handler::NatsServerHandler;
 use crate::protocol::{self, ConnectOptions, ServerInfo}; // Add ServerCommand
 use bytes::{Bytes, BytesMut};
-use std::collections::VecDeque;
-use std::io::{self, IoSlice};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -38,231 +36,38 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-#[derive(Debug)]
-enum PendingWrite {
-    Send {
-        bytes: Bytes,
-        offset: usize,
-    },
-    SendMessage {
-        header_prefix: Bytes,
-        header_prefix_offset: usize,
-        reply_to: Option<Bytes>,
-        reply_to_offset: usize,
-        reply_space_offset: usize,
-        size_bytes: [u8; 20],
-        size_len: usize,
-        size_offset: usize,
-        header_crlf_offset: usize,
-        payload: Bytes,
-        payload_offset: usize,
-        trailer_crlf_offset: usize,
-    },
-}
-
-impl PendingWrite {
-    const CRLF: &[u8] = b"\r\n";
-    const SPACE: &[u8] = b" ";
-
-    fn from_command(cmd: ServerCommand) -> Option<Self> {
-        match cmd {
-            ServerCommand::Send(bytes) | ServerCommand::SendImmediate(bytes) => {
-                Some(PendingWrite::Send { bytes, offset: 0 })
-            }
-            ServerCommand::SendMessage {
-                header_prefix,
-                reply_to,
-                payload_len,
-                payload,
-            } => {
-                let mut size_bytes = [0u8; 20];
-                let mut size_buf = itoa::Buffer::new();
-                let size_str = size_buf.format(payload_len);
-                let size_len = size_str.len();
-                size_bytes[..size_len].copy_from_slice(size_str.as_bytes());
-
-                Some(PendingWrite::SendMessage {
-                    header_prefix,
-                    header_prefix_offset: 0,
-                    reply_to,
-                    reply_to_offset: 0,
-                    reply_space_offset: 0,
-                    size_bytes,
-                    size_len,
-                    size_offset: 0,
-                    header_crlf_offset: 0,
-                    payload,
-                    payload_offset: 0,
-                    trailer_crlf_offset: 0,
-                })
-            }
-            ServerCommand::Shutdown => None,
+/// Append a server command directly into the contiguous write buffer.
+/// Returns (should_shutdown, should_flush_now).
+#[inline]
+fn append_command_to_buf(buf: &mut Vec<u8>, cmd: ServerCommand) -> (bool, bool) {
+    match cmd {
+        ServerCommand::Shutdown => (true, false),
+        ServerCommand::SendImmediate(bytes) => {
+            buf.extend_from_slice(&bytes);
+            (false, true)
         }
-    }
-
-    fn remaining_len(&self) -> usize {
-        match self {
-            PendingWrite::Send { bytes, offset } => bytes.len() - *offset,
-            PendingWrite::SendMessage {
-                header_prefix,
-                header_prefix_offset,
-                reply_to,
-                reply_to_offset,
-                reply_space_offset,
-                size_len,
-                size_offset,
-                header_crlf_offset,
-                payload,
-                payload_offset,
-                trailer_crlf_offset,
-                ..
-            } => {
-                let reply_to_remaining = reply_to
-                    .as_ref()
-                    .map(|value| value.len().saturating_sub(*reply_to_offset))
-                    .unwrap_or(0);
-                let reply_space_remaining = if reply_to.is_some() {
-                    Self::SPACE.len().saturating_sub(*reply_space_offset)
-                } else {
-                    0
-                };
-
-                (header_prefix.len() - *header_prefix_offset)
-                    + reply_to_remaining
-                    + reply_space_remaining
-                    + (size_len - *size_offset)
-                    + (Self::CRLF.len() - *header_crlf_offset)
-                    + (payload.len() - *payload_offset)
-                    + (Self::CRLF.len() - *trailer_crlf_offset)
-            }
+        ServerCommand::Send(bytes) => {
+            buf.extend_from_slice(&bytes);
+            (false, false)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.remaining_len() == 0
-    }
-
-    fn append_io_slices<'a>(&'a self, out: &mut Vec<IoSlice<'a>>, max_slices: usize) {
-        if out.len() >= max_slices {
-            return;
+        ServerCommand::SendMessage {
+            header_prefix,
+            reply_to,
+            payload_len,
+            payload,
+        } => {
+            buf.extend_from_slice(&header_prefix);
+            if let Some(ref reply) = reply_to {
+                buf.extend_from_slice(reply);
+                buf.push(b' ');
+            }
+            let mut size_buf = itoa::Buffer::new();
+            buf.extend_from_slice(size_buf.format(payload_len).as_bytes());
+            buf.extend_from_slice(b"\r\n");
+            buf.extend_from_slice(&payload);
+            buf.extend_from_slice(b"\r\n");
+            (false, false)
         }
-
-        match self {
-            PendingWrite::Send { bytes, offset } => {
-                if *offset < bytes.len() {
-                    out.push(IoSlice::new(&bytes[*offset..]));
-                }
-            }
-            PendingWrite::SendMessage {
-                header_prefix,
-                header_prefix_offset,
-                reply_to,
-                reply_to_offset,
-                reply_space_offset,
-                size_bytes,
-                size_len,
-                size_offset,
-                header_crlf_offset,
-                payload,
-                payload_offset,
-                trailer_crlf_offset,
-            } => {
-                if *header_prefix_offset < header_prefix.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&header_prefix[*header_prefix_offset..]));
-                }
-
-                if let Some(reply_to) = reply_to {
-                    if *reply_to_offset < reply_to.len() && out.len() < max_slices {
-                        out.push(IoSlice::new(&reply_to[*reply_to_offset..]));
-                    }
-                    if *reply_space_offset < Self::SPACE.len() && out.len() < max_slices {
-                        out.push(IoSlice::new(&Self::SPACE[*reply_space_offset..]));
-                    }
-                }
-
-                if *size_offset < *size_len && out.len() < max_slices {
-                    out.push(IoSlice::new(&size_bytes[*size_offset..*size_len]));
-                }
-                if *header_crlf_offset < Self::CRLF.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&Self::CRLF[*header_crlf_offset..]));
-                }
-                if *payload_offset < payload.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&payload[*payload_offset..]));
-                }
-                if *trailer_crlf_offset < Self::CRLF.len() && out.len() < max_slices {
-                    out.push(IoSlice::new(&Self::CRLF[*trailer_crlf_offset..]));
-                }
-            }
-        }
-    }
-
-    fn advance(&mut self, mut bytes: usize) -> usize {
-        let original = bytes;
-
-        match self {
-            PendingWrite::Send {
-                bytes: data,
-                offset,
-            } => {
-                let remaining = data.len() - *offset;
-                let step = remaining.min(bytes);
-                *offset += step;
-                bytes -= step;
-            }
-            PendingWrite::SendMessage {
-                header_prefix,
-                header_prefix_offset,
-                reply_to,
-                reply_to_offset,
-                reply_space_offset,
-                size_len,
-                size_offset,
-                header_crlf_offset,
-                payload,
-                payload_offset,
-                trailer_crlf_offset,
-                ..
-            } => {
-                let prefix_remaining = header_prefix.len() - *header_prefix_offset;
-                let prefix_step = prefix_remaining.min(bytes);
-                *header_prefix_offset += prefix_step;
-                bytes -= prefix_step;
-
-                if let Some(reply_to) = reply_to {
-                    let reply_remaining = reply_to.len() - *reply_to_offset;
-                    let reply_step = reply_remaining.min(bytes);
-                    *reply_to_offset += reply_step;
-                    bytes -= reply_step;
-
-                    let reply_space_remaining = Self::SPACE.len() - *reply_space_offset;
-                    let reply_space_step = reply_space_remaining.min(bytes);
-                    *reply_space_offset += reply_space_step;
-                    bytes -= reply_space_step;
-                }
-
-                let size_remaining = *size_len - *size_offset;
-                let size_step = size_remaining.min(bytes);
-                *size_offset += size_step;
-                bytes -= size_step;
-
-                let header_crlf_remaining = Self::CRLF.len() - *header_crlf_offset;
-                let header_crlf_step = header_crlf_remaining.min(bytes);
-                *header_crlf_offset += header_crlf_step;
-                bytes -= header_crlf_step;
-
-                let payload_remaining = payload.len() - *payload_offset;
-                let payload_step = payload_remaining.min(bytes);
-                *payload_offset += payload_step;
-                bytes -= payload_step;
-
-                let trailer_crlf_remaining = Self::CRLF.len() - *trailer_crlf_offset;
-                let trailer_crlf_step = trailer_crlf_remaining.min(bytes);
-                *trailer_crlf_offset += trailer_crlf_step;
-                bytes -= trailer_crlf_step;
-            }
-        }
-
-        original - bytes
     }
 }
 
@@ -308,101 +113,14 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                             let flush_threshold_bytes =
                                 env_usize("WISP_WRITEV_FLUSH_THRESHOLD_BYTES", 64 * 1024);
                             let flush_idle_us = env_u64("WISP_WRITEV_FLUSH_IDLE_US", 1_000);
-                            let max_io_slices = env_usize("WISP_WRITEV_MAX_IO_SLICES", 1024);
 
                             let mut writer = write_stream;
-                            let mut pending_writes: VecDeque<PendingWrite> = VecDeque::new();
-                            let mut pending_bytes = 0usize;
+                            // Contiguous write buffer — all message parts are copied here,
+                            // then flushed with a single write_all. This eliminates the
+                            // overhead of writev scatter-gather with many small IoSlices.
+                            let mut write_buf: Vec<u8> =
+                                Vec::with_capacity(flush_threshold_bytes + 4096);
                             let mut flush_deadline: Option<Instant> = None;
-
-
-                            fn enqueue_command(
-                                queue: &mut VecDeque<PendingWrite>,
-                                pending_bytes: &mut usize,
-                                cmd: ServerCommand,
-                            ) -> (bool, bool) {
-                                if matches!(&cmd, ServerCommand::Shutdown) {
-                                    return (true, false);
-                                }
-
-                                let should_flush_now =
-                                    matches!(&cmd, ServerCommand::SendImmediate(_));
-
-                                let Some(write) = PendingWrite::from_command(cmd) else {
-                                    return (false, should_flush_now);
-                                };
-
-                                *pending_bytes += write.remaining_len();
-                                queue.push_back(write);
-                                (false, should_flush_now)
-                            }
-
-                            async fn flush_pending(
-                                writer: &mut tokio::net::tcp::OwnedWriteHalf,
-                                queue: &mut VecDeque<PendingWrite>,
-                                pending_bytes: &mut usize,
-                                max_io_slices: usize,
-                            ) -> io::Result<()> {
-                                if *pending_bytes == 0 {
-                                    return Ok(());
-                                }
-
-                                while !queue.is_empty() {
-                                    // Build IoSlices and write in a block so borrows are released
-                                    // before we mutate the queue.
-                                    let written = {
-                                        let mut slices = Vec::with_capacity(
-                                            max_io_slices.min(queue.len() * 7),
-                                        );
-                                        for pending in queue.iter() {
-                                            pending
-                                                .append_io_slices(&mut slices, max_io_slices);
-                                            if slices.len() >= max_io_slices {
-                                                break;
-                                            }
-                                        }
-
-                                        if slices.is_empty() {
-                                            break;
-                                        }
-
-                                        writer.write_vectored(&slices).await?
-                                    };
-
-                                    if written == 0 {
-                                        return Err(io::Error::new(
-                                            io::ErrorKind::WriteZero,
-                                            "write_vectored returned zero bytes",
-                                        ));
-                                    }
-
-                                    let mut remaining = written;
-                                    while remaining > 0 {
-                                        let Some(front) = queue.front_mut() else {
-                                            break;
-                                        };
-
-                                        let consumed = front.advance(remaining);
-                                        if consumed == 0 {
-                                            return Err(io::Error::new(
-                                                io::ErrorKind::WriteZero,
-                                                "failed to advance pending write",
-                                            ));
-                                        }
-
-                                        remaining -= consumed;
-                                        *pending_bytes = pending_bytes.saturating_sub(consumed);
-
-                                        if front.is_complete() {
-                                            queue.pop_front();
-                                        }
-                                    }
-                                }
-
-                                writer.flush().await?;
-                                *pending_bytes = 0;
-                                Ok(())
-                            }
 
                             loop {
                                 let maybe_cmd = match flush_deadline {
@@ -410,9 +128,12 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                         tokio::select! {
                                             received = write_task_rx.recv() => received,
                                             _ = tokio::time::sleep_until(deadline) => {
-                                                if let Err(e) = flush_pending(&mut writer, &mut pending_writes, &mut pending_bytes, max_io_slices).await {
-                                                    error!("[Client {} Writer] Error flushing on timer: {}", client_id, e);
-                                                    break;
+                                                if !write_buf.is_empty() {
+                                                    if let Err(e) = writer.write_all(&write_buf).await {
+                                                        error!("[Client {} Writer] Error flushing on timer: {}", client_id, e);
+                                                        break;
+                                                    }
+                                                    write_buf.clear();
                                                 }
                                                 flush_deadline = None;
                                                 continue;
@@ -423,31 +144,20 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 };
 
                                 let Some(cmd) = maybe_cmd else {
-                                    if let Err(e) = flush_pending(
-                                        &mut writer,
-                                        &mut pending_writes,
-                                        &mut pending_bytes,
-                                        max_io_slices,
-                                    )
-                                    .await
-                                    {
-                                        error!(
-                                            "[Client {} Writer] Error flushing on channel close: {}",
-                                            client_id, e
-                                        );
+                                    // Channel closed — final flush
+                                    if !write_buf.is_empty() {
+                                        let _ = writer.write_all(&write_buf).await;
                                     }
                                     break;
                                 };
 
                                 let (mut should_shutdown, mut should_flush_now) =
-                                    enqueue_command(&mut pending_writes, &mut pending_bytes, cmd);
+                                    append_command_to_buf(&mut write_buf, cmd);
 
+                                // Drain all immediately-available commands
                                 while let Ok(additional_cmd) = write_task_rx.try_recv() {
-                                    let (shutdown, flush_now) = enqueue_command(
-                                        &mut pending_writes,
-                                        &mut pending_bytes,
-                                        additional_cmd,
-                                    );
+                                    let (shutdown, flush_now) =
+                                        append_command_to_buf(&mut write_buf, additional_cmd);
                                     should_flush_now = should_flush_now || flush_now;
                                     if shutdown {
                                         should_shutdown = true;
@@ -455,26 +165,20 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                     }
                                 }
 
-                                if pending_bytes >= flush_threshold_bytes
+                                if write_buf.len() >= flush_threshold_bytes
                                     || should_shutdown
                                     || should_flush_now
                                 {
-                                    if let Err(e) = flush_pending(
-                                        &mut writer,
-                                        &mut pending_writes,
-                                        &mut pending_bytes,
-                                        max_io_slices,
-                                    )
-                                    .await
-                                    {
+                                    if let Err(e) = writer.write_all(&write_buf).await {
                                         error!(
                                             "[Client {} Writer] Error flushing pending writes: {}",
                                             client_id, e
                                         );
                                         break;
                                     }
+                                    write_buf.clear();
                                     flush_deadline = None;
-                                } else if pending_bytes > 0 {
+                                } else if !write_buf.is_empty() {
                                     flush_deadline =
                                         Some(Instant::now() + Duration::from_micros(flush_idle_us));
                                 }
@@ -561,10 +265,116 @@ struct ClientConnectionLogic<H: NatsServerHandler> {
 }
 
 impl<H: NatsServerHandler> ClientConnectionLogic<H> {
+    /// Fast-path inline PUB parser. Parses "PUB <subject> [reply-to] <size>"
+    /// directly from bytes without going through the generic parse pipeline.
+    /// Returns (subject, reply_to, size) or None if the line is not a PUB command.
+    #[inline]
+    fn try_parse_pub_fast(line: &[u8]) -> Option<Result<(&str, Option<&str>, usize), ServerError>> {
+        // Check for "PUB " or "pub " prefix (4 bytes)
+        if line.len() < 5 {
+            return None;
+        }
+        let cmd = &line[..3];
+        if !((cmd[0] == b'P' || cmd[0] == b'p')
+            && (cmd[1] == b'U' || cmd[1] == b'u')
+            && (cmd[2] == b'B' || cmd[2] == b'b')
+            && line[3] == b' ')
+        {
+            return None;
+        }
+
+        let args = &line[4..];
+        if !args.is_ascii() {
+            return Some(Err(ServerError::InvalidProtocol(
+                "Non-ASCII PUB arguments".to_string(),
+            )));
+        }
+        // SAFETY: validated ASCII above
+        let args_str = unsafe { std::str::from_utf8_unchecked(args) };
+
+        // Parse: <subject> [reply-to] <size>
+        // Find first space → end of subject
+        let subject_end = match memchr::memchr(b' ', args) {
+            Some(i) => i,
+            None => {
+                return Some(Err(ServerError::InvalidCommand(
+                    "PUB missing size argument".to_string(),
+                )));
+            }
+        };
+        let subject = &args_str[..subject_end];
+
+        // Check for wildcards in subject
+        if memchr::memchr(b'*', subject.as_bytes()).is_some()
+            || memchr::memchr(b'>', subject.as_bytes()).is_some()
+        {
+            return Some(Err(ServerError::InvalidArgument {
+                command: "PUB".to_string(),
+                argument: format!("wildcard subjects are not allowed: '{}'", subject),
+            }));
+        }
+
+        // Skip spaces after subject
+        let mut pos = subject_end + 1;
+        while pos < args.len() && args[pos] == b' ' {
+            pos += 1;
+        }
+        if pos >= args.len() {
+            return Some(Err(ServerError::InvalidCommand(
+                "PUB missing size argument".to_string(),
+            )));
+        }
+
+        // Find next space (if any) → determines if there's a reply-to
+        let rest = &args_str[pos..];
+        match memchr::memchr(b' ', rest.as_bytes()) {
+            Some(i) => {
+                // Three tokens: subject reply-to size
+                let reply_to = &rest[..i];
+                let size_str = rest[i + 1..].trim_start();
+                match size_str.parse::<usize>() {
+                    Ok(size) => Some(Ok((subject, Some(reply_to), size))),
+                    Err(_) => Some(Err(ServerError::InvalidArgument {
+                        command: "PUB".to_string(),
+                        argument: format!("Invalid size: {}", size_str),
+                    })),
+                }
+            }
+            None => {
+                // Two tokens: subject size
+                match rest.parse::<usize>() {
+                    Ok(size) => Some(Ok((subject, None, size))),
+                    Err(_) => Some(Err(ServerError::InvalidArgument {
+                        command: "PUB".to_string(),
+                        argument: format!("Invalid size: {}", rest),
+                    })),
+                }
+            }
+        }
+    }
+
+    /// Read payload + CRLF, validate, return payload as Bytes.
+    #[inline]
+    async fn read_pub_payload(&mut self, size: usize) -> ServerResult<Bytes> {
+        let payload_with_crlf = size + 2;
+        self.payload_buffer.clear();
+        self.payload_buffer.reserve(payload_with_crlf);
+        self.payload_buffer.resize(payload_with_crlf, 0);
+        self.reader.read_exact(&mut self.payload_buffer).await?;
+
+        if &self.payload_buffer[size..] != b"\r\n" {
+            return Err(ServerError::InvalidProtocol(
+                "PUB payload not followed by CRLF".to_string(),
+            ));
+        }
+
+        let payload = self.payload_buffer.split_to(size).freeze();
+        self.payload_buffer.clear();
+        Ok(payload)
+    }
+
     /// Processes incoming commands from the client's reader half.
     async fn process_incoming(&mut self) -> ServerResult<()> {
-        // 1. Send INFO immediately using the sender
-        // Correct way to send INFO:
         let info_wire_string = self.server_info.to_wire_string()?;
         let info_bytes = Bytes::from(info_wire_string);
 
@@ -574,7 +384,7 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
             .await
             .is_err()
         {
-            return Err(ServerError::ClientDisconnected); // Channel closed, writer task likely died
+            return Err(ServerError::ClientDisconnected);
         }
         debug!("[Client {}] Queued INFO for sending", self.id);
 
@@ -584,17 +394,15 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
         loop {
             line_buffer.clear();
 
-            // Use Vec<u8> for more efficient line reading - avoids String allocations
             let read_result = self.reader.read_until(b'\n', &mut line_buffer).await;
 
             match read_result {
                 Ok(0) => {
-                    // Connection closed by client
                     info!("[Client {}] Read stream closed by peer.", self.id);
                     return Err(ServerError::ClientDisconnected);
                 }
                 Ok(_) => {
-                    // Process the line we just read - remove trailing \r\n
+                    // Trim trailing \r\n or \n
                     let mut line_bytes = &line_buffer[..];
                     if line_bytes.ends_with(b"\r\n") {
                         line_bytes = &line_bytes[..line_bytes.len() - 2];
@@ -602,16 +410,44 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                         line_bytes = &line_bytes[..line_bytes.len() - 1];
                     }
 
-                    debug!(
-                        "[Client {}] Received Raw: '{}'",
-                        self.id,
-                        String::from_utf8_lossy(line_bytes)
-                    );
-
                     if line_bytes.is_empty() {
                         continue;
                     }
 
+                    // === Fast path: PUB command (most frequent in benchmarks) ===
+                    if let Some(pub_result) = Self::try_parse_pub_fast(line_bytes) {
+                        let handler_result = match pub_result {
+                            Ok((subject, reply_to, size)) => {
+                                let payload = self.read_pub_payload(size).await?;
+                                self.handler
+                                    .handle_pub(
+                                        self.id,
+                                        subject,
+                                        reply_to,
+                                        payload,
+                                        &self.sender_to_writer,
+                                    )
+                                    .await
+                            }
+                            Err(e) => Err(e),
+                        };
+
+                        if let Err(e) = handler_result {
+                            error!("[Client {}] Error handling PUB: {}", self.id, e);
+                            let err_msg = protocol::format_err(&e.to_string());
+                            if self
+                                .sender_to_writer
+                                .send(ServerCommand::SendImmediate(err_msg))
+                                .await
+                                .is_err()
+                            {
+                                return Err(ServerError::ClientDisconnected);
+                            }
+                        }
+                        continue;
+                    }
+
+                    // === Slow path: all other commands ===
                     let parse_result = protocol::parse_command_line_bytes(line_bytes);
 
                     match parse_result {
@@ -626,12 +462,6 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
 
                                     match args_str {
                                         Ok(args_str) => {
-                                            debug!(
-                                                "[Client {}] Parsed Command: '{}', Args Str: '{}'",
-                                                self.id,
-                                                String::from_utf8_lossy(command_bytes),
-                                                args_str
-                                            );
                                             self.handle_command_bytes(command_bytes, args_str).await
                                         }
                                         Err(e) => Err(e),
@@ -642,15 +472,8 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                             "Non-ASCII command arguments".to_string(),
                                         ))
                                     } else {
-                                        // SAFETY: Non-CONNECT command arguments are validated as ASCII above.
                                         let args_str =
                                             unsafe { std::str::from_utf8_unchecked(args_bytes) };
-                                        debug!(
-                                            "[Client {}] Parsed Command: '{}', Args Str: '{}'",
-                                            self.id,
-                                            String::from_utf8_lossy(command_bytes),
-                                            args_str
-                                        );
                                         self.handle_command_bytes(command_bytes, args_str).await
                                     }
                                 };
@@ -661,7 +484,6 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                     "[Client {}] Error handling command '{}': {}",
                                     self.id, command_str, e
                                 );
-                                // Send -ERR back to client
                                 let err_msg = protocol::format_err(&e.to_string());
                                 if self
                                     .sender_to_writer
@@ -669,10 +491,6 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                     .await
                                     .is_err()
                                 {
-                                    warn!(
-                                        "[Client {}] Failed to queue error response: channel closed.",
-                                        self.id
-                                    );
                                     return Err(ServerError::ClientDisconnected);
                                 }
                             }
@@ -690,22 +508,17 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                                 .await
                                 .is_err()
                             {
-                                warn!(
-                                    "[Client {}] Failed to queue protocol error response: channel closed.",
-                                    self.id
-                                );
                                 return Err(ServerError::ClientDisconnected);
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    // IO error reading line
                     error!("[Client {}] Error reading from stream: {}", self.id, e);
                     return Err(ServerError::Io(e));
                 }
             }
-        } // end loop
+        }
     }
 
     /// Zero-allocation version of handle_command that works with byte slices
@@ -723,23 +536,9 @@ impl<H: NatsServerHandler> ClientConnectionLogic<H> {
                 .await?;
             self.connect_options = Some(options); // Store options after successful handling
         } else if protocol::command_matches(command_bytes, b"PUB") {
+            // Fallback PUB path (fast path in process_incoming handles most PUBs)
             let (subject, reply_to, size) = protocol::parse_pub_args(args_str)?;
-
-            let payload_with_crlf = size + 2;
-            self.payload_buffer.clear();
-            self.payload_buffer.reserve(payload_with_crlf);
-            self.payload_buffer.resize(payload_with_crlf, 0);
-            self.reader.read_exact(&mut self.payload_buffer).await?;
-
-            if &self.payload_buffer[size..] != b"\r\n" {
-                return Err(ServerError::InvalidProtocol(
-                    "PUB payload not followed by CRLF".to_string(),
-                ));
-            }
-
-            let payload = self.payload_buffer.split_to(size).freeze();
-            self.payload_buffer.clear();
-
+            let payload = self.read_pub_payload(size).await?;
             self.handler
                 .handle_pub(self.id, subject, reply_to, payload, &self.sender_to_writer)
                 .await?;

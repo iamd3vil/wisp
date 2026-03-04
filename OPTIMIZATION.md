@@ -2,14 +2,17 @@
 
 ## 1. Current Performance
 
-Wisp currently matches NATS server performance on single-node fan-out benchmarks:
+Wisp exceeds NATS server performance on most workloads:
 
-| Payload | Wisp | NATS | Fan-out ratio |
+| Workload | Wisp | NATS | Delta |
 |---|---|---|---|
-| 64B | 3.87M msg/s | 3.88M msg/s | — |
-| 1KB | 1.60M msg/s | 1.77M msg/s | 4.0x (perfect) |
+| 64B 1:1 | 5.13M msg/s | 3.84M msg/s | **+33.7%** |
+| 1KB 1:1 | 2.09M msg/s | 2.09M msg/s | **parity** |
+| 8KB 1:1 | 397K msg/s | 428K msg/s | -7.3% |
+| Many subjects (5000) | 3.83M msg/s | 1.48M msg/s | **+158%** |
+| Fan-out 100 subs | ~100K pub/s | ~30K pub/s | **~3.3×** |
 
-The goal from here is to push past NATS on the workloads that matter most (wide fan-out, high subject cardinality, wildcard-heavy subscriptions) and close the ~10% gap on the 1KB payload case.
+Remaining gap: 8KB large payloads (-7.3%) due to memcpy cost of copying payload into contiguous write buffer.
 
 ---
 
@@ -21,8 +24,11 @@ These optimizations are already landed in the codebase (see `BENCHMARK_JOURNAL.m
 - **Dispatch caching.** Per-subject dispatch resolution cache with bounded size + LRU-style eviction metadata.
 - **Surgical cache invalidation.** Targeted invalidation on SUB/UNSUB/disconnect instead of global cache clears.
 - **UNSUB cleanup.** Real shard + `sid_map` removal on UNSUB, with targeted invalidation.
-- **Header-prefix caching + no per-dispatch header allocation path.** `MSG <subject> <sid> ` cached per dispatch, and writer now builds message parts via vectored I/O without per-subscriber header buffer allocation.
-- **Batched vectored writer queue.** Custom pending-write queue with `write_vectored`, partial-write tracking, and tunable flush thresholds/timers.
+- **Header-prefix caching + no per-dispatch header allocation path.** `MSG <subject> <sid> ` cached per dispatch, writer assembles message from cached prefix + payload.
+- **Contiguous write buffer (replaced writev).** Flat `Vec<u8>` write buffer with `write_all` replaces scatter-gather writev with 5-7 IoSlices per message. Eliminated complex `PendingWrite` enum, VecDeque, partial-write tracking. **+33.7% on 64B, +10% on 1KB.**
+- **Fast-path PUB parser.** Inline single-pass PUB parser using `memchr` bypasses generic command dispatch for the hot path.
+- **Removed `async_trait` boxing.** Replaced with native RPITIT (`impl Future` in traits). Eliminated malloc/free per `handle_pub` call (~14% of CPU).
+- **ahash for dispatch cache.** Switched DashMap from SipHash to ahash (~9.5% of reader CPU).
 - **Reader payload buffer reuse.** Reused `BytesMut` for PUB payload reads.
 - **Borrowed parse args.** `parse_pub_args` / `parse_sub_args` / `parse_unsub_args` return borrows to avoid hot-path `String` allocations.
 - **ASCII fast-path parsing.** Non-CONNECT commands use ASCII validation + unchecked UTF-8 conversion.
