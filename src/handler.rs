@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::str::Split;
 use std::sync::Arc;
@@ -8,74 +9,69 @@ use crate::command::ServerCommand;
 use crate::error::ServerResult;
 use crate::protocol::{self, ConnectOptions};
 use ahash::AHasher;
-use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::{RwLock, mpsc};
 
 /// Trait defining the callbacks for handling NATS client commands.
 /// Implement this trait to define the server's behavior.
-#[async_trait]
+///
+/// Uses native async fn in traits (Rust 2024 edition) to avoid
+/// the per-call Box allocation imposed by #[async_trait].
 pub trait NatsServerHandler: Send + Sync + 'static {
     /// Called when a client issues a CONNECT command.
-    /// `sender` can be used to queue messages back to the client (e.g., errors).
-    async fn handle_connect(
+    fn handle_connect(
         &self,
         client_id: u64,
         options: &ConnectOptions,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client issues a PUB command.
-    /// `sender` can be used to queue messages back to the client (e.g., errors, or later for dispatching MSG).
-    async fn handle_pub(
+    fn handle_pub(
         &self,
         client_id: u64,
         subject: &str,
         reply_to: Option<&str>,
         payload: Bytes,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client issues a SUB command.
-    /// `sender` can be used to queue messages back to the client (e.g., acknowledgements, errors).
-    async fn handle_sub(
+    fn handle_sub(
         &self,
         client_id: u64,
         subject: &str,
         queue_group: Option<&str>,
         sid: &str,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client issues an UNSUB command.
-    async fn handle_unsub(
+    fn handle_unsub(
         &self,
         client_id: u64,
         sid: &str,
         max_msgs: Option<u64>,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client issues a PING command.
-    /// The server automatically sends PONG via the connection task unless ConnectOptions.echo was true.
-    /// This handler might be used for custom logic or error reporting via sender.
-    async fn handle_ping(
+    fn handle_ping(
         &self,
         client_id: u64,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client issues a PONG command.
-    async fn handle_pong(
+    fn handle_pong(
         &self,
         client_id: u64,
         sender: &mpsc::Sender<ServerCommand>,
-    ) -> ServerResult<()>;
+    ) -> impl Future<Output = ServerResult<()>> + Send;
 
     /// Called when a client connection is closed (normally or due to error).
-    /// The sender might be invalid here, so it's not passed.
-    async fn handle_disconnect(&self, client_id: u64);
+    fn handle_disconnect(&self, client_id: u64) -> impl Future<Output = ()> + Send;
 }
 
 #[derive(Debug, Default)]
@@ -242,8 +238,8 @@ pub struct ClientHandler {
     // Per-client reverse wildcard index to avoid linear wildcard SID scans.
     wildcard_sid_index: Arc<DashMap<u64, WildcardSidIndex>>,
 
-    // Cache resolved subscriber lists per publish subject
-    dispatch_cache: Arc<DashMap<String, Arc<CachedDispatch>>>,
+    // Cache resolved subscriber lists per publish subject (uses ahash for faster hashing)
+    dispatch_cache: Arc<DashMap<String, Arc<CachedDispatch>, ahash::RandomState>>,
     dispatch_cache_capacity: usize,
     dispatch_cache_tick: Arc<AtomicU64>,
     dispatch_cache_evictions: Arc<AtomicU64>,
@@ -272,7 +268,7 @@ impl ClientHandler {
             wildcard_has_subscribers: Arc::new(AtomicBool::new(false)),
             sid_map: Arc::new(DashMap::new()),
             wildcard_sid_index: Arc::new(DashMap::new()),
-            dispatch_cache: Arc::new(DashMap::new()),
+            dispatch_cache: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             dispatch_cache_capacity,
             dispatch_cache_tick: Arc::new(AtomicU64::new(0)),
             dispatch_cache_evictions: Arc::new(AtomicU64::new(0)),
@@ -574,7 +570,6 @@ impl ClientHandler {
     }
 }
 
-#[async_trait]
 impl NatsServerHandler for ClientHandler {
     async fn handle_connect(
         &self,

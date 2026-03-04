@@ -16,7 +16,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"                                 # For parsing CONNECT options
 lazy_static = "1.4"
 uuid = { version = "1.16.0", features = ["v4"] }
-async-trait = "0.1.88"
 submap = "0.3.5"
 itoa = "1.0.15"
 dashmap = "5.5"

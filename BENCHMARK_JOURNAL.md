@@ -566,3 +566,339 @@ Delta (Wisp vs NATS):
 - CPU avg: **-36.3%** (better)
 - CPU median sample: **-45.6%** (better)
 - RSS max: **+77.6%** (worse)
+
+---
+
+## 2026-03-04 — Full benchmark matrix: Wisp vs NATS across all workload shapes
+
+Scope:
+- Comprehensive comparison across 8 workload shapes covering single fan-out, wide fan-out, large payload, and multi-subject scenarios.
+- All tests on the same machine, same session, using `nats bench` against Wisp (`./target/release/wisp`) and `nats-server` 2.12.4.
+- 3–5 runs per scenario per server; medians reported.
+
+---
+
+### 1. Single fan-out 64B (1 pub / 1 sub / 1 topic / 1,000,000 msgs)
+
+Wisp (3 runs, pub / sub msg/s / avg / P99 / P99.9):
+- 2,947,312 / 2,971,412 / 0.29us / 0.20us / 9.70us
+- 2,984,321 / 3,009,393 / 0.28us / 0.20us / 10.16us
+- 2,970,686 / 2,997,087 / 0.29us / 0.20us / 9.54us
+
+NATS (3 runs):
+- 3,742,751 / 3,754,614 / 0.22us / 0.16us / 13.83us
+- 3,748,258 / 3,758,033 / 0.22us / 0.16us / 12.91us
+- 3,784,958 / 3,795,974 / 0.21us / 0.16us / 14.45us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | 2,970,686 | **3,748,258** | **-20.8%** |
+| sub msg/s | 2,997,087 | **3,758,033** | **-20.2%** |
+| avg latency | 0.29us | **0.22us** | +31.8% |
+| P99 latency | 0.20us | **0.16us** | +25.0% |
+| P99.9 latency | **9.70us** | 13.83us | **-29.9%** |
+
+---
+
+### 2. Single fan-out 1KB (1 pub / 1 sub / 1 topic / 500,000 msgs)
+
+Wisp (3 runs, pub / sub msg/s / avg / P99 / P99.9):
+- 1,741,751 / 1,749,084 / 0.52us / 5.20us / 65.54us
+- 1,487,159 / 1,488,965 / 0.62us / 5.12us / 31.79us
+- 1,604,423 / 1,609,584 / 0.57us / 3.62us / 128.87us
+
+NATS (3 runs):
+- 2,124,448 / 2,129,376 / 0.42us / 4.41us / 33.95us
+- 2,142,885 / 2,066,606 / 0.41us / 5.00us / 60.16us
+- 2,050,185 / 1,955,085 / 0.44us / 6.20us / 31.95us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | 1,604,423 | **2,124,448** | **-24.5%** |
+| sub msg/s | 1,609,584 | **2,066,606** | **-22.1%** |
+| avg latency | 0.57us | **0.42us** | +35.7% |
+| P99 latency | 5.12us | **5.00us** | +2.4% |
+| P99.9 latency | 65.54us | **33.95us** | +93.0% |
+
+---
+
+### 3. Wide fan-out 50 subs, 128B (1 pub / 50 sub / 1 topic / 30,000 msgs)
+
+Wisp (3 runs, pub / sub-agg msg/s / avg / P99 / P99.9):
+- 215,152 / 10,817,408 / 3.22us / 0.25us / 30.83us
+- 271,973 / 12,555,908 / 3.12us / 0.25us / 27.20us
+- 281,640 / 12,575,558 / 2.84us / 0.20us / 21.70us
+
+NATS (3 runs):
+- 57,162 / 2,858,782 / 9.95us / 0.20us / 19.83us
+- 58,018 / 2,903,119 / 5.45us / 0.20us / 15.00us
+- 57,170 / 2,859,375 / 8.28us / 0.25us / 18.62us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | **271,973** | 57,170 | **+375.8%** |
+| sub-agg msg/s | **12,555,908** | 2,859,375 | **+339.2%** |
+| avg latency | **3.12us** | 8.28us | **-62.3%** |
+| P99 latency | 0.25us | 0.20us | +25.0% |
+| P99.9 latency | 27.20us | 18.62us | +46.1% |
+
+---
+
+### 4. Wide fan-out 100 subs, 128B (1 pub / 100 sub / 1 topic / 30,000 msgs)
+
+Wisp (5 runs, pub / sub-agg msg/s / avg / P99 / P99.9):
+- 128,926 / 12,269,915 / 6.70us / 0.25us / 27.83us
+- 146,999 / 10,151,953 / 4.95us / 0.25us / 23.66us
+- 137,714 / 9,720,475 / 4.68us / 0.25us / 20.37us
+- 107,688 / 10,764,615 / 6.53us / 0.20us / 24.16us
+- 125,030 / 12,134,353 / 4.03us / 0.20us / 16.12us
+
+NATS (5 runs):
+- 22,449 / 2,245,338 / 28.65us / 0.25us / 22.54us
+- 21,544 / 2,155,077 / 31.10us / 0.29us / 26.04us
+- 31,854 / 3,186,927 / 6.25us / 0.25us / 27.75us
+- 28,903 / 2,891,013 / 11.31us / 0.25us / 21.75us
+- 27,108 / 2,710,165 / 6.08us / 0.25us / 18.41us
+
+Additional 3 runs (separate batch):
+
+Wisp:
+- 136,447 / 12,252,349 / 5.76us / 0.29us / 22.20us
+- 123,464 / 12,227,498 / 5.61us / 0.25us / 23.75us
+- 114,670 / 11,666,813 / 6.84us / 0.20us / 30.33us
+
+NATS:
+- 24,729 / 2,474,179 / 25.84us / 0.29us / 26.95us
+- 30,374 / 3,037,328 / 6.61us / 0.25us / 19.41us
+- 18,733 / 1,873,704 / 36.03us / 0.25us / 19.62us
+
+Median summary (5-run batch):
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | **128,926** | 27,108 | **+375.6%** |
+| sub-agg msg/s | **10,764,615** | 2,710,165 | **+297.2%** |
+| avg latency | **4.95us** | 11.31us | **-56.2%** |
+| P99 latency | 0.25us | 0.25us | 0.0% |
+| P99.9 latency | 23.66us | 22.54us | +5.0% |
+
+---
+
+### 5. Wide fan-out 50 subs, 64B (1 pub / 50 sub / 1 topic / 50,000 msgs)
+
+Wisp (3 runs, pub / sub-agg msg/s / avg / P99 / P99.9):
+- 167,150 / 7,900,839 / 2.94us / 0.16us / 20.12us
+- 202,981 / 10,199,632 / 3.75us / 0.20us / 30.58us
+- 235,917 / 11,557,998 / 2.74us / 0.20us / 23.83us
+
+NATS (3 runs):
+- 61,170 / 3,059,428 / 1.22us / 0.20us / 13.58us
+- 61,390 / 3,069,911 / 4.17us / 0.16us / 18.91us
+- 58,256 / 2,913,063 / 5.83us / 0.16us / 10.37us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | **202,981** | 61,170 | **+231.8%** |
+| sub-agg msg/s | **10,199,632** | 3,059,428 | **+233.4%** |
+| avg latency | **2.94us** | 4.17us | **-29.5%** |
+| P99 latency | 0.20us | **0.16us** | +25.0% |
+| P99.9 latency | 23.83us | **13.58us** | +75.5% |
+
+---
+
+### 6. Large payload 8KB (1 pub / 10 sub / 1 topic / 50,000 msgs)
+
+Wisp (3 runs, pub / sub-agg msg/s / avg / P99 / P99.9):
+- 101,928 / 791,937 / 9.69us / 24.16us / 570.33us
+- 101,202 / 786,663 / 9.76us / 23.66us / 657.91us
+- 96,747 / 760,133 / 10.24us / 23.75us / 647.62us
+
+NATS (3 runs):
+- 80,228 / 758,666 / 12.24us / 31.66us / 1,659.41us
+- 82,740 / 768,528 / 11.85us / 29.29us / 1,692.20us
+- 78,719 / 747,452 / 12.48us / 32.41us / 1,634.04us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | **101,202** | 80,228 | **+26.1%** |
+| sub-agg msg/s | **786,663** | 758,666 | **+3.7%** |
+| throughput | **791 MiB/s** | 627 MiB/s | **+26.2%** |
+| avg latency | **9.76us** | 12.24us | **-20.3%** |
+| P99 latency | **23.66us** | 29.29us | **-19.2%** |
+| P99.9 latency | **647.62us** | 1,659.41us | **-61.0%** |
+
+---
+
+### 7. Many subjects (10 pub / 10 sub / 1000 topics / 200,000 msgs / 128B)
+
+Wisp (3 runs, pub-agg / sub-agg msg/s):
+- 822,441 / 7,993,904
+- 804,898 / 7,990,246
+- 804,478 / 7,895,780
+
+NATS (3 runs):
+- 409,150 / 4,097,643
+- 412,279 / 4,124,875
+- 403,013 / 4,036,210
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub-agg msg/s | **804,898** | 409,150 | **+96.7%** |
+| sub-agg msg/s | **7,993,904** | 4,097,643 | **+95.1%** |
+
+---
+
+### 8. Non-fanout many subjects (1 pub / 1 sub / 5000 topics / 2,000,000 msgs / 64B)
+
+Wisp (5 runs, pub / sub msg/s / avg / P99 / P99.9):
+- 2,734,334 / — / 0.23us / 2.37us / 11.29us
+- 2,714,368 / — / 0.23us / 2.41us / 11.04us
+- 2,678,112 / — / 0.24us / 2.20us / 11.83us
+- 2,710,952 / — / 0.23us / 2.08us / 9.20us
+- 2,664,552 / — / 0.24us / 2.16us / 9.12us
+
+Verification run (sub line captured):
+- 2,678,802 / 2,676,959
+
+NATS (5 runs):
+- 1,465,571 / 1,466,263 / 0.54us / 0.95us / 21.29us
+- 1,472,199 / 1,472,862 / 0.53us / 1.04us / 21.12us
+- 1,465,404 / 1,466,283 / 0.54us / 1.00us / 22.25us
+- 1,469,311 / 1,470,233 / 0.54us / 0.91us / 21.58us
+- 1,467,529 / 1,468,296 / 0.54us / 1.00us / 21.45us
+
+Median summary:
+
+| Metric | Wisp | NATS | Delta |
+|---|---:|---:|---:|
+| pub msg/s | **2,710,952** | 1,467,529 | **+84.7%** |
+| avg latency | **0.23us** | 0.54us | **-57.4%** |
+| P99 latency | 2.20us | **1.00us** | +120.0% |
+| P99.9 latency | **11.04us** | 21.45us | **-48.5%** |
+
+---
+
+### Overall comparison
+
+| Scenario | Wisp vs NATS | Winner |
+|---|---:|---|
+| Single 1:1 64B | -20.8% | NATS |
+| Single 1:1 1KB | -24.5% | NATS |
+| Fan-out 50 sub 128B | +375.8% | **Wisp** |
+| Fan-out 100 sub 128B | +375.6% | **Wisp** |
+| Fan-out 50 sub 64B | +231.8% | **Wisp** |
+| Large payload 8KB (10 sub) | +26.1% | **Wisp** |
+| Many subjects (10p/10s) | +96.7% | **Wisp** |
+| Non-fanout many subjects (1p/1s) | +84.7% | **Wisp** |
+
+### Interpretation
+- Wisp dominates on fan-out workloads (3–5× faster) and multi-subject scenarios (~2× faster). These are the workloads the optimization effort targeted.
+- NATS retains a ~20–25% edge on single-publisher single-subscriber throughput. This regression traces to the batched writev writer path introduced in the "Batched writev queue" change — it adds overhead in non-fan-out cases where the batching benefit doesn't materialize.
+- Large payload (8KB) shows a solid Wisp win (+26%) with dramatically better P99.9 latency (648us vs 1,659us), suggesting the vectored I/O path handles larger writes more efficiently.
+- P99.9 tail latency is a mixed picture: Wisp wins on non-fanout and large payload workloads but loses on wide fan-out, likely due to batching-induced jitter when many subscriber writers flush concurrently.
+
+---
+
+## 2026-03-04 — Remove async_trait boxing + ahash dispatch cache
+
+Optimization scope:
+- **Remove `#[async_trait]` from `NatsServerHandler` trait and impl.** The `async_trait` macro wraps every async method return in `Pin<Box<dyn Future>>`, causing a heap allocation + deallocation per call. Profiling showed this accounted for ~14% of CPU on the PUB hot path (44 free + 13 malloc samples out of 399 active samples). Replaced with native `async fn in trait` (Rust 2024 edition RPITIT) which uses static dispatch — zero heap allocation.
+- **Switch dispatch_cache `DashMap` to ahash.** DashMap defaults to SipHash, which appeared as ~9.5% of reader samples (16 out of 169). Changed to `DashMap<String, ..., ahash::RandomState>` for faster hashing.
+- **Removed `async-trait` crate dependency.**
+
+### Profiling methodology
+
+Used macOS `sample` tool to capture 3 seconds of stack samples during a 1p/1s/64B workload. Key findings in the reader task (169 of 313 run_task samples):
+
+| Hotspot | Samples | % of reader | Description |
+|---|---:|---:|---|
+| `_xzm_free` (async_trait future drop) | 44 | 26.0% | Heap deallocation of boxed handle_pub future |
+| `handle_pub` future allocation | 13 | 7.7% | Heap allocation of boxed handle_pub future |
+| DashMap dispatch_cache SipHash | 16 | 9.5% | Hashing subject string for cache lookup |
+| `parse_pub_args` | 17 | 10.1% | Argument parsing |
+| `read_exact` (payload read) | 11 | 6.5% | Socket read for payload bytes |
+| `BytesMut` operations | 9 | 5.3% | reserve/split_to/freeze for payload buffer |
+
+### Raw results
+
+#### Single fan-out 64B (1 pub / 1 sub / 1 topic / 1,000,000 msgs)
+
+Wisp after (5 runs, pub / sub msg/s):
+- 3,671,512 / 3,665,644
+- 3,769,257 / 3,768,282
+- 3,842,421 / 3,814,959
+- 3,983,811 / 3,958,093
+- 3,798,789 / 3,810,293
+
+Median: pub **3,798,789**, sub **3,810,293**
+
+Compared to before (median 2,970,686 / 2,997,087):
+- pub: **+27.9%**
+- sub: **+27.1%**
+
+Compared to NATS (median 3,748,258):
+- pub: **+1.3%** ← Wisp now matches NATS on this workload
+
+#### Single fan-out 1KB (1 pub / 1 sub / 1 topic / 500,000 msgs)
+
+Wisp after (3 runs, pub / sub msg/s):
+- 1,811,445 / 1,816,385
+- 1,928,496 / 1,908,559
+- 1,895,840 / 1,902,000
+
+Median: pub **1,895,840**, sub **1,902,000**
+
+Compared to before (median 1,604,423 / 1,609,584):
+- pub: **+18.2%**
+- sub: **+18.2%**
+
+Compared to NATS (median 2,124,448):
+- pub: **-10.8%** (gap closed from -24.5% to -10.8%)
+
+#### Wide fan-out 100 subs 128B (1 pub / 100 sub / 1 topic / 30,000 msgs)
+
+Wisp after (3 runs, pub / sub-agg msg/s):
+- 117,099 / 8,655,524
+- 97,348 / 9,971,900
+- 126,861 / 12,852,080
+
+Median: pub **117,099**, sub-agg **9,971,900**
+
+Compared to before (median 128,926 / 10,764,615):
+- pub: **-9.2%**
+- sub-agg: **-7.4%**
+
+Note: High run-to-run variance on this workload (run 3 hit 12.8M sub-agg). The regression is within noise.
+
+#### Non-fanout many subjects (1 pub / 1 sub / 5000 topics / 2,000,000 msgs / 64B)
+
+Wisp after (3 runs, pub / sub msg/s):
+- 3,806,842 / 3,808,662
+- 3,629,594 / 3,631,755
+- 3,794,082 / 3,793,300
+
+Median: pub **3,794,082**, sub **3,793,300**
+
+Compared to before (median 2,710,952):
+- pub: **+39.9%**
+
+Compared to NATS (median 1,467,529):
+- pub: **+158.5%** (Wisp is 2.6× faster)
+
+### Interpretation
+- Removing `async_trait` boxing was the single highest-impact optimization for 1:1 throughput, closing the NATS gap entirely on 64B payloads.
+- The 1KB gap shrank from -24.5% to -10.8% — the remaining gap is likely dominated by payload buffer allocation (`split_to` + `freeze` creates a new `Bytes` with shared state per PUB) and the inherently higher per-byte cost in the writev path.
+- Non-fanout many-subjects saw a dramatic +40% improvement, confirming that the boxing overhead was proportionally larger when the handler is called millions of times with cheap cache-hit dispatch.
+- Wide fan-out showed no meaningful regression; variance on that workload is naturally high.

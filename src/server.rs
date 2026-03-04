@@ -315,6 +315,7 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                             let mut pending_bytes = 0usize;
                             let mut flush_deadline: Option<Instant> = None;
 
+
                             fn enqueue_command(
                                 queue: &mut VecDeque<PendingWrite>,
                                 pending_bytes: &mut usize,
@@ -347,19 +348,27 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                                 }
 
                                 while !queue.is_empty() {
-                                    let mut slices = Vec::with_capacity(max_io_slices);
-                                    for pending in queue.iter() {
-                                        pending.append_io_slices(&mut slices, max_io_slices);
-                                        if slices.len() >= max_io_slices {
+                                    // Build IoSlices and write in a block so borrows are released
+                                    // before we mutate the queue.
+                                    let written = {
+                                        let mut slices = Vec::with_capacity(
+                                            max_io_slices.min(queue.len() * 7),
+                                        );
+                                        for pending in queue.iter() {
+                                            pending
+                                                .append_io_slices(&mut slices, max_io_slices);
+                                            if slices.len() >= max_io_slices {
+                                                break;
+                                            }
+                                        }
+
+                                        if slices.is_empty() {
                                             break;
                                         }
-                                    }
 
-                                    if slices.is_empty() {
-                                        break;
-                                    }
+                                        writer.write_vectored(&slices).await?
+                                    };
 
-                                    let written = writer.write_vectored(&slices).await?;
                                     if written == 0 {
                                         return Err(io::Error::new(
                                             io::ErrorKind::WriteZero,
