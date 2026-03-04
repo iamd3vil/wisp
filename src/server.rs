@@ -197,7 +197,9 @@ impl<H: NatsServerHandler + Clone> NatsServer<H> {
                         });
 
                         // --- Reader task logic ---
-                        let reader = BufReader::new(read_stream);
+                        // 64KB buffer reduces syscall frequency for payload reads.
+                        // Default 8KB means 1KB payloads often trigger extra recvfrom.
+                        let reader = BufReader::with_capacity(64 * 1024, read_stream);
                         let mut connection_logic = ClientConnectionLogic {
                             id: client_id,
                             reader,

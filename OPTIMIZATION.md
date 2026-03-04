@@ -53,7 +53,7 @@ worker thread:
 | DashMap dispatch cache | 43 | 2.1% | hash + lookup |
 | Misc (bookkeeping, drops) | 385 | 19.0% | Everything else |
 
-### 3.N1 Eliminate payload buffer reallocation cycle ⏳
+### 3.N1 Eliminate payload buffer reallocation cycle ✅ Done
 
 **Priority: P0 — largest actionable win (~16.1% of CPU)**
 
@@ -96,7 +96,7 @@ one malloc per PUB for the current malloc + Arc-malloc, saving the `split_to` pr
 and 35-sample `split_to` are directly eliminated; the 97-sample writer-side free becomes
 a simple deallocation instead of Arc drop + shared-state teardown.
 
-### 3.N2 Skip zero-fill in payload resize ⏳
+### 3.N2 Skip zero-fill in payload resize ✅ Done (combined with 3.N1)
 
 **Priority: P1 — quick win (2.5% of CPU)**
 
@@ -118,7 +118,7 @@ self.reader.read_exact(&mut self.payload_buffer).await?;
 
 **Expected impact.** Saves 51 samples (2.5%) — the `memset` call in `resize`.
 
-### 3.N3 Bypass BufReader for payload reads ⏳
+### 3.N3 Bypass BufReader for payload reads ⚠️ Partial (64KB buffer)
 
 **Priority: P1 — moderate win (4.3% of CPU)**
 
