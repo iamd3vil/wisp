@@ -62,6 +62,18 @@ Optimization scope:
 
 **Fan-out summary**: Wisp **~3.3× faster** — no regression from write buffer change
 
+**Full fan-out matrix (3 runs each, median values)**
+
+| Scenario | NATS pub | Wisp pub | NATS sub_agg | Wisp sub_agg |
+|---|---:|---:|---:|---:|
+| 50 sub 128B (60K msgs) | 56,148 | 130,188 | 2,808,266 | 6,563,368 |
+| 100 sub 128B (30K msgs) | 28,828 | 78,704 | 2,883,470 | 7,968,149 |
+| 50 sub 1KB (30K msgs) | 32,820 | 107,960 | 1,641,792 | 4,683,495 |
+| 100 sub 1KB (10K msgs) | 15,209 | 76,506 | 1,520,637 | 4,386,209 |
+
+Fan-out ratios: Wisp is **2.3–5.0× faster** on publisher rate, **2.3–2.9× faster** on
+aggregate subscriber throughput across all fan-out scenarios tested.
+
 ### Progression vs previous optimization round (2026-03-04 async_trait removal)
 
 | Workload | Before (writev) | After (flat buf) | Improvement |
