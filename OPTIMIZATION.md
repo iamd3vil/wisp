@@ -38,11 +38,173 @@ These optimizations are already landed in the codebase (see `BENCHMARK_JOURNAL.m
 
 ---
 
-## 3. Immediate Opportunities
+## 3. Next Optimizations (profiled 2026-03-04, 1KB workload)
 
-These are concrete, scoped changes that can be implemented and benchmarked independently. Each should land with a flamegraph or allocation profile comparing before/after.
+Profiled under `nats bench` 1KB 1:1 workload. Of 2024 active samples in the busiest
+worker thread:
 
-### 3.1 Surgical Dispatch Cache Invalidation ✅ Done
+| Category | Samples | % of active | Key functions |
+|---|---:|---:|---|
+| Kernel I/O (recvfrom + sendto) | 882 | 43.6% | Unavoidable syscalls |
+| malloc/free lifecycle | 326 | 16.1% | reserve_inner, split_to, Bytes drop |
+| memcpy/memset (data movement) | 225 | 11.1% | payload copy, BufReader, resize |
+| Channel overhead (mpsc) | 87 | 4.3% | push/pop, semaphore, block alloc |
+| Parsing (memchr + radix) | 76 | 3.8% | try_parse_pub_fast |
+| DashMap dispatch cache | 43 | 2.1% | hash + lookup |
+| Misc (bookkeeping, drops) | 385 | 19.0% | Everything else |
+
+### 3.N1 Eliminate payload buffer reallocation cycle ⏳
+
+**Priority: P0 — largest actionable win (~16.1% of CPU)**
+
+**Problem.** Every PUB triggers a malloc/free cycle in `read_pub_payload`:
+
+1. `reserve_inner` → **malloc** (143 samples, 76 in kernel `mach_vm_reclaim`)
+2. `resize(n, 0)` → **memset** to zero-fill (51 samples)
+3. `split_to` → **malloc** for Arc shared-state promotion (35 samples)
+4. Writer `append_command_to_buf` drops the `Bytes` → **free** (97 samples)
+
+Total: **326 samples (16.1%)** just for the allocation lifecycle of one payload buffer.
+
+**Root cause.** `split_to()` detaches the `BytesMut` from its backing allocation (promotes
+to shared state via Arc). The subsequent `clear()` + `reserve()` on the next PUB finds
+the buffer has no owned capacity left, so it must `malloc` a fresh allocation. This turns
+the "reusable" `payload_buffer` into a per-PUB malloc/free cycle.
+
+**Proposed fix.** Two options (try in order):
+
+**Option A — Avoid `split_to` entirely.** Read payload into `payload_buffer`, then have
+`handle_pub` and `append_command_to_buf` copy directly from the raw `&[u8]` slice.
+This requires changing `ServerCommand::SendMessage` to carry the payload inline (as part
+of a pre-built wire message) or changing the handler to write payload bytes into the
+writer's buffer directly. The payload buffer is then truly reused without reallocation.
+
+```rust
+// Instead of:
+let payload = self.payload_buffer.split_to(size).freeze(); // malloc!
+// Do:
+let payload_slice = &self.payload_buffer[..size]; // borrow, no alloc
+// Build the full wire message or pass the slice through channel
+```
+
+**Option B — Pre-allocate per PUB with `BytesMut::zeroed`.** Allocate a fresh
+`BytesMut::zeroed(size)` per PUB (skips the reuse buffer entirely), read into it, and
+`freeze()` directly. `freeze()` on a non-shared BytesMut is free (no Arc). This trades
+one malloc per PUB for the current malloc + Arc-malloc, saving the `split_to` promotion.
+
+**Expected impact.** ~10-16% CPU reduction on the 1KB path. The 143-sample `reserve_inner`
+and 35-sample `split_to` are directly eliminated; the 97-sample writer-side free becomes
+a simple deallocation instead of Arc drop + shared-state teardown.
+
+### 3.N2 Skip zero-fill in payload resize ⏳
+
+**Priority: P1 — quick win (2.5% of CPU)**
+
+**Problem.** `self.payload_buffer.resize(payload_with_crlf, 0)` zero-fills the buffer
+with memset before `read_exact` immediately overwrites every byte.
+
+**Proposed fix.** Use `unsafe { self.payload_buffer.set_len(payload_with_crlf) }` after
+ensuring capacity is sufficient. Safety argument: `read_exact` is guaranteed to fill
+exactly `payload_with_crlf` bytes before returning `Ok`, so no uninitialized memory is
+ever exposed.
+
+```rust
+self.payload_buffer.clear();
+self.payload_buffer.reserve(payload_with_crlf);
+// SAFETY: read_exact will fill exactly payload_with_crlf bytes.
+unsafe { self.payload_buffer.set_len(payload_with_crlf); }
+self.reader.read_exact(&mut self.payload_buffer).await?;
+```
+
+**Expected impact.** Saves 51 samples (2.5%) — the `memset` call in `resize`.
+
+### 3.N3 Bypass BufReader for payload reads ⏳
+
+**Priority: P1 — moderate win (4.3% of CPU)**
+
+**Problem.** `BufReader` adds an extra memcpy (88 samples) when reading payloads. For
+`read_exact` of 1KB+, the data is read from the socket into BufReader's internal buffer,
+then copied from BufReader's buffer into the payload buffer. This double-copy is
+unnecessary for large reads.
+
+**Proposed fix.** Two approaches:
+
+**Option A — Increase BufReader capacity.** Increase from default 8KB to 64KB so that
+1KB payloads are more often served from the already-buffered data (avoiding a fresh
+`recvfrom`). This doesn't eliminate the copy but reduces syscall frequency.
+
+**Option B — Read payloads directly from the socket.** After parsing the PUB command line
+(which needs buffered reading), drain the BufReader's remaining buffered bytes into the
+payload buffer, then read any remaining payload bytes directly from the underlying
+`TcpStream` (bypassing BufReader). This eliminates the intermediate copy for large payloads.
+
+```rust
+// Pseudo-code for Option B:
+let buffered = self.reader.buffer(); // what's already in BufReader
+let from_buf = buffered.len().min(payload_with_crlf);
+payload_buffer[..from_buf].copy_from_slice(&buffered[..from_buf]);
+self.reader.consume(from_buf);
+if from_buf < payload_with_crlf {
+    // Read remainder directly from underlying stream
+    self.reader.get_mut().read_exact(&mut payload_buffer[from_buf..]).await?;
+}
+```
+
+**Expected impact.** Saves 88 samples (4.3%) — the memmove inside BufReader's poll_read.
+
+### 3.N4 Reduce mpsc channel overhead ⏳
+
+**Priority: P2 — moderate win (4.3% of CPU)**
+
+**Problem.** The tokio `mpsc::channel` uses a linked-list of blocks internally. Each
+block allocation (5 samples in malloc) and the semaphore acquire/release (48 samples)
+add overhead. For 1:1 workloads, this is a single-producer single-consumer queue.
+
+**Proposed fix.** Options:
+
+**Option A — Increase channel buffer size.** Current is 10,000. Increasing to 50,000+
+reduces the frequency of semaphore contention (sender blocks less often).
+
+**Option B — Use a lock-free SPSC ring buffer.** For the 1:1 case, replace the tokio
+mpsc with a fixed-size SPSC ring buffer (e.g., `rtrb` or `ringbuf` crate). This
+eliminates semaphore overhead and linked-list block allocation entirely. Requires
+detecting when only one subscriber is connected.
+
+**Option C — Batch messages before channel send.** Instead of sending one
+`ServerCommand` per subscriber per PUB, accumulate messages in a `SmallVec` and send
+them as a batch through the channel. Amortizes the per-send semaphore cost.
+
+**Expected impact.** 3-5% CPU reduction from reduced semaphore + allocation overhead.
+
+### 3.N5 io_uring (Linux only) ⏳
+
+**Priority: P3 — speculative (~5-10% on Linux)**
+
+**Problem.** Kernel I/O syscalls (`recvfrom` + `sendto`) consume 43.6% of active CPU.
+Each syscall has entry/exit overhead (register save/restore, privilege transition).
+
+**Proposed fix.** On Linux, replace tokio's epoll-based reactor with io_uring via
+`tokio-uring`. io_uring batches I/O submissions via shared ring buffers, avoiding
+per-operation syscall transitions. It also supports:
+- **Registered buffers:** pre-register read/write buffers with the kernel
+- **Zero-copy send:** `IORING_OP_SEND_ZC` avoids copying data to kernel buffers
+- **Batched completions:** multiple I/O operations reaped in one `io_uring_enter`
+
+**Why the gains would be moderate, not dramatic:**
+1. Writes are already batched (flat buffer + single `write_all` per flush)
+2. Read side is limited by TCP arrival rate, not syscall overhead
+3. macOS has no io_uring equivalent (kqueue doesn't batch submissions)
+4. `tokio-uring` is a separate runtime, not a drop-in for `tokio`
+
+**Expected impact.** ~5-10% on 1KB throughput on Linux. Not applicable on macOS.
+
+---
+
+## 4. Previously Completed Optimizations
+
+These are concrete, scoped changes that have been implemented and benchmarked.
+
+### 4.1 Surgical Dispatch Cache Invalidation ✅ Done
 
 **Problem.** `invalidate_dispatch_cache()` calls `self.dispatch_cache.clear()`, nuking every cached dispatch list whenever any subscription change occurs — a single SUB, UNSUB, or client disconnect wipes the entire cache. With 10,000 active subjects and one new subscription, all 10,000 dispatch lists get rebuilt on the next publish.
 
@@ -63,7 +225,7 @@ This preserves the cache for the vast majority of subjects and turns a thunderin
 
 **Validation.** Add a cache hit/miss counter (`AtomicU64`) and compare hit ratios before/after under a `nats bench` workload with 1000+ subjects and occasional subscribe/unsubscribe churn.
 
-### 3.2 Pre-Cached MSG Header Prefix in SubscriberDispatch ✅ Done (and extended)
+### 4.2 Pre-Cached MSG Header Prefix in SubscriberDispatch ✅ Done (and extended)
 
 **Problem.** In `handle_pub` (handler.rs:288-294), `protocol::format_msg_header()` is called once per subscriber per published message. Each call allocates a new `BytesMut`, writes `MSG <subject> <sid> [reply-to] <size>\r\n`, and freezes it into `Bytes`. For a subject with 1000 subscribers, that's 1000 heap allocations per publish.
 
@@ -77,7 +239,7 @@ The header/payload split is already done (from the `SendMessage` work), but the 
 
 **Expected impact.** Eliminates the hottest per-message allocation in wide fan-out scenarios. At 3.87M msg/s aggregate, even small per-message savings compound significantly.
 
-### 3.3 UNSUB Cleanup ✅ Done (except max_msgs auto-expiry)
+### 4.3 UNSUB Cleanup ✅ Done (except max_msgs auto-expiry)
 
 **Problem.** `handle_unsub` currently logs the event and calls `invalidate_dispatch_cache()` but does not actually remove the subscription from the shard maps or `sid_map`. This means:
 
@@ -93,7 +255,7 @@ The header/payload split is already done (from the `SendMessage` work), but the 
 4. Invalidate only the affected subject(s) in the dispatch cache (per 3.1).
 5. If `max_msgs` is `Some(n)`, store a decrement counter and trigger cleanup automatically when it hits zero.
 
-### 3.4 Borrowed Subjects Through the Parse → Handle Path ✅ Done
+### 4.4 Borrowed Subjects Through the Parse → Handle Path ✅ Done
 
 **Problem.** `parse_pub_args` returns `(String, Option<String>, usize)`, allocating a new heap `String` for the subject (and optionally reply-to) on every single PUB command. These strings are derived from `args_str`, which is a `&str` borrow from the line buffer that lives long enough for the entire `handle_command_bytes` call.
 
@@ -117,7 +279,7 @@ The handler trait already accepts `subject: &str`, so the only changes are in th
 
 **Impact.** Eliminates 1-2 String allocations per PUB command. At 3.87M msg/s, that's ~4-8M fewer allocations/sec.
 
-### 3.5 Reader Payload Buffer Reuse ✅ Done
+### 4.5 Reader Payload Buffer Reuse ✅ Done
 
 **Problem.** Every PUB command allocates a fresh `BytesMut`:
 
@@ -138,7 +300,7 @@ struct ClientConnectionLogic<H: NatsServerHandler> {
 
 On each PUB, `clear()` + `reserve()` reuses the underlying allocation if capacity is sufficient (which it almost always will be since payload sizes are bounded by `MAX_PAYLOAD` and most messages are far smaller than the high-water mark). After `split_to(size).freeze()`, the `BytesMut` retains its allocation for the next message.
 
-### 3.6 Writer Flush Coalescing ✅ Done (superseded by batched writev queue)
+### 4.6 Writer Flush Coalescing ✅ Done (superseded by batched writev queue)
 
 **Problem.** The writer's `try_recv()` drain loop works well under burst load, but under moderate steady-state load, messages often arrive one at a time: `recv().await` → write one message → `try_recv()` finds nothing → `flush()` → syscall. This means one `write(2)` + `flush()` per message.
 
@@ -170,7 +332,7 @@ Also consider increasing `BufWriter` capacity from 8KB to 64KB to reduce the fre
 
 **Validation.** Measure syscall rate using `strace -c` before/after. Target: 5-10x reduction in `write(2)` calls under sustained load.
 
-### 3.7 Bounded Dispatch Cache with LRU Eviction ✅ Done
+### 4.7 Bounded Dispatch Cache with LRU Eviction ✅ Done
 
 **Problem.** The `dispatch_cache` grows without bound. A long-lived server with high subject churn (e.g., subjects like `quotes.<symbol>.<timestamp>`) will accumulate stale entries that consume memory and slow down DashMap operations.
 
@@ -182,7 +344,7 @@ Also consider increasing `BufWriter` capacity from 8KB to 64KB to reduce the fre
 
 **Validation.** Expose cache size, hit rate, and eviction count as metrics. Measure memory growth over a 1-hour sustained bench with subject churn.
 
-### 3.8 Dispatch Vector Pooling
+### 4.8 Dispatch Vector Pooling
 
 **Problem.** When dispatch cache entries are invalidated, the `Vec<SubscriberDispatch>` is dropped and freed. Under subscription churn, this creates allocation thrash as Vecs are repeatedly allocated and freed.
 
@@ -190,11 +352,11 @@ Also consider increasing `BufWriter` capacity from 8KB to 64KB to reduce the fre
 
 ---
 
-## 4. Medium-Term Optimizations
+## 5. Medium-Term Optimizations
 
 These require more design work or structural changes but can push throughput meaningfully past NATS.
 
-### 4.1 Wildcard SID Resolution: Reverse Index
+### 5.1 Wildcard SID Resolution: Reverse Index
 
 **Problem.** `resolve_sid_for_subject` (handler.rs:152-166) does an exact lookup first, then falls back to a linear scan over all of a client's subscriptions doing `subject_matches()` on each pattern:
 
@@ -212,7 +374,7 @@ For a client with 500 wildcard subscriptions, this is O(500) per message per sub
 
 **Proposed fix (for cache-cold and wildcard-heavy workloads).** Build a trie or radix tree per client indexing wildcard patterns by token structure. At dispatch time, walk the trie with concrete subject tokens, matching `*` and `>` nodes. This turns the lookup from O(N) pattern scans to O(depth) where depth is the number of tokens in the subject (typically 2-4).
 
-### 4.2 Avoid UTF-8 Validation on the Hot Path ✅ Done
+### 5.2 Avoid UTF-8 Validation on the Hot Path ✅ Done
 
 **Problem.** Every command's arguments are validated as UTF-8 in `server.rs:253`:
 
@@ -224,7 +386,7 @@ NATS subjects are ASCII-only. The UTF-8 validation checks for multi-byte sequenc
 
 **Proposed fix.** For PUB and SUB commands, use `unsafe { std::str::from_utf8_unchecked(args_bytes) }` on the hot path. Safety argument: NATS wire protocol allows only ASCII in subjects and SIDs, and the parser validates structure. Alternatively, use `args_bytes.is_ascii()` as a cheaper check. Keep safe `from_utf8` for CONNECT (which carries JSON with potentially non-ASCII fields).
 
-### 4.3 Client ID Deduplication Without Sorting ✅ Done (merge-path variant)
+### 5.3 Client ID Deduplication Without Sorting ✅ Done (merge-path variant)
 
 **Problem.** `build_dispatches` collects client IDs from shard + wildcard lookups, then deduplicates via:
 
@@ -238,7 +400,7 @@ client_ids.dedup();
 - **Bitset:** Client IDs are sequential from an `AtomicU64`. Use a fixed-size bitset (`[u64; 16]` = 1024 clients) for O(1) insert and O(n) iteration.
 - **Pre-deduplication:** If `SubMap` guarantees no duplicates within a shard, duplicates only arise between the literal and wildcard shards. A two-pointer merge of two sorted lists is O(n + m) without the full sort.
 
-### 4.4 Write Vectored I/O (writev) ✅ Done (custom batched writer)
+### 5.4 Write Vectored I/O (writev) ✅ Done (custom batched writer)
 
 **Problem.** The writer does three sequential `write_all` calls for `SendMessage`:
 
@@ -252,7 +414,7 @@ writer.write_all(CRLF).await?;
 
 **Caveat.** `BufWriter` may not pass `write_vectored` through. A custom buffered writer or direct buffer management may be needed.
 
-### 4.5 Per-Subject Publish Counters
+### 5.5 Per-Subject Publish Counters
 
 Add lightweight counters to dispatch cache entries:
 
@@ -268,21 +430,21 @@ Use for LRU/LFU eviction, identifying hot subjects for pre-computed header optim
 
 ---
 
-## 5. Longer-Term Investigations
+## 6. Longer-Term Investigations
 
-### 5.1 io_uring for Network I/O
+### 6.1 io_uring for Network I/O
 
 Replace tokio's epoll-based reactor with io_uring via `tokio-uring`. io_uring can batch I/O operations into a single `io_uring_enter` syscall and supports zero-copy sends (`IORING_OP_SEND_ZC`). Pursue after measuring that syscall overhead is still a significant fraction of CPU time after flush coalescing (3.6) and write vectored (4.4).
 
-### 5.2 Shared Memory Fan-Out for Co-located Clients
+### 6.2 Shared Memory Fan-Out for Co-located Clients
 
 For subscribers on the same machine, a shared memory transport eliminates the kernel network stack entirely. Write the message once into an mmap'd ring buffer; subscriber processes read from it with their own cursors (Disruptor pattern). This is how Aeron's IPC channel achieves 10-50M msg/s. Would be a separate transport alongside TCP.
 
-### 5.3 Interest Graph Instrumentation
+### 6.3 Interest Graph Instrumentation
 
 Add tracing spans around the critical dispatch path: shard lookup latency, cache hit/miss ratio, channel send latency, writer flush latency, per-client backpressure events. Gate with a `WISP_TRACE=dispatch` env var so there's zero overhead unless explicitly enabled.
 
-### 5.4 Queue Groups and Fair Dispatch
+### 6.4 Queue Groups and Fair Dispatch
 
 The current cache stores a flat `Vec<SubscriberDispatch>`. Queue groups need different dispatch logic where only one member receives each message. Options:
 
@@ -290,7 +452,7 @@ The current cache stores a flat `Vec<SubscriberDispatch>`. Queue groups need dif
 - **Weighted random:** Select member weighted by remaining channel capacity, providing natural backpressure-aware load balancing.
 - **Separate dispatch path:** Queue group subjects bypass regular fan-out; cache stores regular and queue-group subscribers separately.
 
-### 5.5 Permission and Account Hooks
+### 6.5 Permission and Account Hooks
 
 Design trait interfaces now for auth, permissions, and account isolation so future work doesn't rewrite the fast path:
 
@@ -298,15 +460,15 @@ Design trait interfaces now for auth, permissions, and account isolation so futu
 - `PermissionCheck` trait on SUB and PUB. The PUB check must be fast enough for every publish — consider a bitset or bloom filter for allowed subjects.
 - Account-level subject namespacing with explicit cross-account delivery.
 
-### 5.6 JetStream-Style Persistence
+### 6.6 JetStream-Style Persistence
 
 If durable messaging is needed, the persistence layer should subscribe like a normal client, receive messages through standard dispatch, and write to a WAL (`redb`, `sled`, or raw file) in a dedicated task. The publish path remains unaware of persistence. Acks flow through the standard reply-to mechanism.
 
 ---
 
-## 6. Validation Strategy
+## 7. Validation Strategy
 
-### 6.1 Benchmark Matrix
+### 7.1 Benchmark Matrix
 
 Maintain a repeatable `nats bench` suite:
 
@@ -320,7 +482,7 @@ Maintain a repeatable `nats bench` suite:
 | Wildcard heavy | 10 | 50 (wildcard) | 1000 | 128B | TBD | 400k msg/s |
 | Sub churn | 1 | 10 (cycling) | 100 | 128B | TBD | Cache hit >95% |
 
-### 6.2 Per-Run Metrics
+### 7.2 Per-Run Metrics
 
 For every optimization, capture:
 
@@ -331,7 +493,7 @@ For every optimization, capture:
 - **memory high-water mark** (via `/proc/<pid>/status` VmHWM)
 - **CPU flamegraph** (via `perf record -g` + `flamegraph.pl`)
 
-### 6.3 Regression Suite
+### 7.3 Regression Suite
 
 Protocol conformance tests covering:
 
@@ -343,7 +505,7 @@ Protocol conformance tests covering:
 - Connection drop during PUB payload read (partial payload).
 - UNSUB with `max_msgs` auto-expiry.
 
-### 6.4 Profiling Workflow
+### 7.4 Profiling Workflow
 
 Every optimization PR should include:
 
@@ -354,22 +516,36 @@ Every optimization PR should include:
 
 ---
 
-## 7. Implementation Priority
+## 8. Implementation Priority
 
-Ordered by expected impact-to-effort ratio, given the current 3.87M msg/s baseline:
+### Next round (Section 3 — profiling-driven, 1KB workload)
 
-| Priority | Optimization | Section | Effort | Expected Impact | Status |
-|---|---|---|---|---|---|
-| P0 | Surgical cache invalidation | 3.1 | Medium | High — eliminates thundering rebuild under churn | ✅ Done |
-| P0 | UNSUB cleanup | 3.3 | Medium | Correctness — stale dispatch prevention | ⚠️ Mostly done (`max_msgs` auto-expiry pending) |
-| P0 | Borrowed subjects in parse | 3.4 | Low | Medium — ~4-8M fewer allocs/sec | ✅ Done |
-| P1 | Pre-cached MSG header prefix | 3.2 | Medium | High — eliminates per-subscriber alloc in fan-out | ✅ Done (and extended to no per-dispatch header alloc path) |
-| P1 | Reader payload buffer reuse | 3.5 | Low | Medium — removes per-PUB allocation | ✅ Done |
-| P1 | Writer flush coalescing | 3.6 | Medium | Medium-High — reduces syscall rate | ✅ Done (evolved into custom batched writer) |
-| P2 | Bounded dispatch cache / LRU | 3.7 | Medium | Memory safety under churn | ✅ Done |
-| P2 | Dispatch vector pooling | 3.8 | Low | Low-Medium — reduces alloc churn | ⏳ Not done |
-| P2 | Write vectored I/O | 4.4 | Medium | Medium — further syscall reduction | ✅ Done (custom batched writev queue) |
-| P3 | Wildcard SID reverse index | 4.1 | High | High for wildcard-heavy workloads | ⏳ Not done |
-| P3 | Skip UTF-8 validation | 4.2 | Low | Low — small constant factor | ✅ Done |
-| P3 | Client ID dedup without sort | 4.3 | Low | Low — small constant factor | ✅ Done (merge-path variant) |
-| P3 | Per-subject publish counters | 4.5 | Low | Observability, enables smarter eviction | ⏳ Not done |
+| Priority | Optimization | Section | Effort | Expected Impact |
+|---|---|---|---|---|
+| **P0** | Eliminate payload buffer realloc cycle | 3.N1 | Medium | **~16% CPU** — largest single win |
+| **P1** | Skip zero-fill in payload resize | 3.N2 | Low | ~2.5% CPU — quick unsafe win |
+| **P1** | Bypass BufReader for payload reads | 3.N3 | Medium | ~4.3% CPU — eliminate double-copy |
+| **P2** | Reduce mpsc channel overhead | 3.N4 | Medium | ~4.3% CPU — channel + semaphore |
+| **P3** | io_uring (Linux only) | 3.N5 | High | ~5-10% — syscall batching |
+
+### Previously completed
+
+| Priority | Optimization | Section | Status |
+|---|---|---|---|
+| P0 | Surgical cache invalidation | 4.1 | ✅ Done |
+| P0 | UNSUB cleanup | 4.3 | ⚠️ Mostly done (`max_msgs` pending) |
+| P0 | Borrowed subjects in parse | 4.4 | ✅ Done |
+| P0 | Contiguous write buffer (replaced writev) | — | ✅ Done (+33.7% on 64B) |
+| P0 | Fast-path PUB parser | — | ✅ Done |
+| P0 | Removed async_trait boxing | — | ✅ Done |
+| P0 | ahash for dispatch cache | — | ✅ Done |
+| P1 | Pre-cached MSG header prefix | 4.2 | ✅ Done |
+| P1 | Reader payload buffer reuse | 4.5 | ✅ Done |
+| P1 | Writer flush coalescing | 4.6 | ✅ Done (evolved into flat buffer) |
+| P2 | Bounded dispatch cache / LRU | 4.7 | ✅ Done |
+| P2 | Write vectored I/O | 5.4 | ✅ Done (then replaced by flat buffer) |
+| P2 | Dispatch vector pooling | 4.8 | ⏳ Not done |
+| P3 | Wildcard SID reverse index | 5.1 | ⏳ Not done |
+| P3 | Skip UTF-8 validation | 5.2 | ✅ Done |
+| P3 | Client ID dedup without sort | 5.3 | ✅ Done |
+| P3 | Per-subject publish counters | 5.5 | ⏳ Not done |
